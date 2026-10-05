@@ -231,6 +231,113 @@ def cmd_imm(pe, idx, args):
         print(f"  0x{v:<10x} {v:>12}   @ {where}")
 
 
+VT = {0xb0: "HciRegWrite?", 0x1a8: "RegRead?", 0x1b0: "RegisterWrite",
+      0x1b8: "vt+0x1b8"}
+
+_IMM = re.compile(r"^(e?d[xi]|dx|r8d|r9d|r8w|ecx|cx),\s*(0x[0-9a-f]+|\d+)$", re.I)
+_CALLVT = re.compile(r"^qword ptr \[rax \+ (0x[0-9a-f]+)\]$")
+
+
+def cmd_writes(pe, idx, args):
+    """Reconstruct the (register, value) sequence a bring-up function writes.
+
+    These functions all follow one shape: load the register number into dx and the
+    value into r8d, then make an indirect vtable call. Track the last immediate
+    seen in each and emit a line per call.
+    """
+    f = resolve(pe, idx, args.who)
+    if not f:
+        print(f"no function matching {args.who!r}")
+        return
+    b, e, strs = f
+    print(f"=== {name_of(strs) or '?'}  0x{b:06x}-0x{e:06x} : write sequence ===")
+    print(f"{'#':>3}  {'at':>8}  {'reg':>7}  {'value':>12}  via")
+    held = {}
+    n = 0
+    for i in disasm(pe, b, e):
+        m = _IMM.match(i.op_str) if i.mnemonic == "mov" else None
+        if m:
+            held[m.group(1).lower()] = int(m.group(2), 0)
+            continue
+        # any other write to a tracked reg invalidates the immediate we held
+        if i.mnemonic in ("mov", "movzx", "movsxd", "lea", "imul", "add", "or",
+                          "xor", "and", "sub", "shl", "shr"):
+            dst = i.op_str.split(",")[0].strip().lower()
+            if dst in held:
+                held[dst] = None
+            if dst in ("edx", "rdx") and "dx" in held:
+                held["dx"] = None
+            if dst in ("r8", "r8d") and "r8d" in held:
+                held["r8d"] = None
+            continue
+        if i.mnemonic == "call":
+            cm = _CALLVT.match(i.op_str)
+            if not cm:
+                continue
+            off = int(cm.group(1), 0)
+            reg = held.get("dx")
+            val = held.get("r8d")
+            n += 1
+            rs = f"0x{reg:04x}" if reg is not None else "(computed)"
+            vs = f"0x{val:08x}" if val is not None else "(from memory)"
+            print(f"{n:>3}  {i.address:08x}  {rs:>7}  {vs:>12}  {VT.get(off, hex(off))}")
+    if not n:
+        print("  (no vtable write calls found)")
+
+
+_LEA_RIP = re.compile(r"^(r[a-z0-9]+),\s*\[rip \+ (0x[0-9a-f]+)\]$")
+_MOV_FIELD = re.compile(r"^qword ptr \[(r[a-z0-9]+) \+ (0x[0-9a-f]+)\],\s*(r[a-z0-9]+)$")
+
+
+def cmd_vtable(pe, idx, args):
+    """Resolve object function-pointer slots.
+
+    These objects don't use a C++ vtable; the constructor stores function pointers
+    into fields of the object itself (`mov [rcx+0x1b0], <CUsbCntl_RegisterWrite>`).
+    Pair each `lea reg,[rip+X]` that lands on a known function with the following
+    store, and we get slot -> function name for every indirect call site.
+    """
+    names = {}
+    for (b, e, strs) in idx:
+        n = name_of(strs)
+        if n:
+            names[b] = n
+
+    f = resolve(pe, idx, args.who)
+    if not f:
+        print(f"no function matching {args.who!r}")
+        return
+    b, e, strs = f
+    print(f"=== {name_of(strs) or '?'}  0x{b:06x}-0x{e:06x} : function-pointer slots ===")
+    text = pe.section(".text")
+    lo, hi = text["vaddr"], text["vaddr"] + text["rawsize"]
+
+    held = {}      # reg -> (target_rva, name)
+    found = {}
+    for i in disasm(pe, b, e):
+        if i.mnemonic == "lea":
+            m = _LEA_RIP.match(i.op_str)
+            if m:
+                tgt = i.address + i.size + int(m.group(2), 0)
+                if lo <= tgt < hi:
+                    held[m.group(1)] = (tgt, names.get(tgt))
+                else:
+                    held.pop(m.group(1), None)
+            continue
+        if i.mnemonic == "mov":
+            m = _MOV_FIELD.match(i.op_str)
+            if m and m.group(3) in held:
+                off = int(m.group(2), 0)
+                tgt, nm = held[m.group(3)]
+                found[off] = (tgt, nm)
+    if not found:
+        print("  (no function-pointer stores found here)")
+        return
+    for off in sorted(found):
+        tgt, nm = found[off]
+        print(f"  +0x{off:04x}  ->  0x{tgt:06x}  {nm or '(unnamed)'}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -240,6 +347,8 @@ def main():
     s = sub.add_parser("show"); s.add_argument("who"); s.set_defaults(fn=cmd_show)
     s = sub.add_parser("xref"); s.add_argument("pattern"); s.set_defaults(fn=cmd_xref)
     s = sub.add_parser("imm");  s.add_argument("who"); s.set_defaults(fn=cmd_imm)
+    s = sub.add_parser("writes"); s.add_argument("who"); s.set_defaults(fn=cmd_writes)
+    s = sub.add_parser("vtable"); s.add_argument("who"); s.set_defaults(fn=cmd_vtable)
     args = ap.parse_args()
 
     pe = PE(args.sys)

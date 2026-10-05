@@ -1,1 +1,15 @@
+# compiled probe/bring-up tools (rebuild with the command in each .c file header)
+tools/desc
 tools/gl310probe
+tools/gl310init
+tools/__pycache__/
+*.o
+
+# Ghidra working projects: large binary DBs plus lock/temp files
+ghidra/
+gl310.gpr
+gl310.rep/
+*.lock
+*.lock~
+
+captures/*.tmp

@@ -182,6 +182,70 @@ static void battery(void) {
                     : "<- DIFFERENT: replies may be off by one");
 }
 
+/* --- ARM memory reads (op 0x02, read-only) -------------------------------- */
+
+/* MemoryRead: `02 00 04 00` waddr:u32 waddr:u32 -> 4 bytes.
+   waddr is a 32-bit WORD address, i.e. byte_addr >> 2. */
+static int mem_read(unsigned int byte_addr, unsigned char *out4) {
+    unsigned char c[12];
+    unsigned int w = byte_addr >> 2;
+    put_hdr(c, 0x02, 0x00, 4, w);
+    c[8]  = w & 0xff;
+    c[9]  = (w >> 8) & 0xff;
+    c[10] = (w >> 16) & 0xff;
+    c[11] = (w >> 24) & 0xff;
+    return generic_cmd(c, 12, out4, 4);
+}
+
+static void mem_dump(unsigned int start, unsigned int nwords) {
+    unsigned char w[4];
+    verbose = 0;
+    for (unsigned int i = 0; i < nwords; i++) {
+        unsigned int a = start + i * 4;
+        if (i % 8 == 0) printf("%s%08x:", i ? "\n" : "", a);
+        if (mem_read(a, w) == 4) printf(" %02x%02x%02x%02x", w[0], w[1], w[2], w[3]);
+        else printf(" --------");
+    }
+    printf("\n");
+}
+
+/* Sample one word every `stride` bytes over [start,end), twice, and report any
+   word that changed. A single change proves the ARM core is executing. */
+static void mem_watch(unsigned int start, unsigned int end, unsigned int stride) {
+    unsigned int n = (end - start + stride - 1) / stride;
+    unsigned char *a = malloc(n * 4), *b = malloc(n * 4);
+    unsigned char w[4];
+    int reads = 0, nonzero = 0, changed = 0;
+
+    verbose = 0;
+    printf("pass 1: %u samples, 0x%06x..0x%06x stride 0x%x\n", n, start, end, stride);
+    for (unsigned int i = 0; i < n; i++) {
+        memset(a + i * 4, 0, 4);
+        if (mem_read(start + i * stride, w) == 4) { memcpy(a + i * 4, w, 4); reads++; }
+    }
+    printf("pass 2 ...\n");
+    for (unsigned int i = 0; i < n; i++) {
+        memset(b + i * 4, 0, 4);
+        mem_read(start + i * stride, w);
+        memcpy(b + i * 4, w, 4);
+    }
+    for (unsigned int i = 0; i < n; i++) {
+        if (a[i*4] || a[i*4+1] || a[i*4+2] || a[i*4+3]) nonzero++;
+        if (memcmp(a + i * 4, b + i * 4, 4)) {
+            if (changed < 24)
+                printf("  CHANGED 0x%06x: %02x%02x%02x%02x -> %02x%02x%02x%02x\n",
+                       start + i * stride,
+                       a[i*4], a[i*4+1], a[i*4+2], a[i*4+3],
+                       b[i*4], b[i*4+1], b[i*4+2], b[i*4+3]);
+            changed++;
+        }
+    }
+    printf("\n%d/%u reads ok, %d non-zero, %d CHANGED\n", reads, n, nonzero, changed);
+    printf(changed ? "=> words are moving: the ARM core IS executing\n"
+                   : "=> nothing moved: no sign of a running ARM\n");
+    free(a); free(b);
+}
+
 /* --- raw mode ------------------------------------------------------------- */
 
 static int hexparse(const char *s, unsigned char *out, int max) {
@@ -203,17 +267,35 @@ int main(int argc, char **argv) {
     const char *raw = NULL;
     int raw_reply = 0, do_battery = 1;
 
+    unsigned int md_start = 0, md_words = 0, mw_start = 0, mw_end = 0, mw_stride = 0;
+    int do_memdump = 0, do_memwatch = 0;
+
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--allow-write")) allow_write = 1;
         else if (!strcmp(argv[i], "--raw") && i + 2 < argc) {
             raw = argv[++i];
             raw_reply = atoi(argv[++i]);
             do_battery = 0;
+        } else if (!strcmp(argv[i], "--memdump") && i + 2 < argc) {
+            md_start = (unsigned)strtoul(argv[++i], NULL, 0);
+            md_words = (unsigned)strtoul(argv[++i], NULL, 0);
+            do_memdump = 1; do_battery = 0;
+        } else if (!strcmp(argv[i], "--memwatch") && i + 3 < argc) {
+            mw_start  = (unsigned)strtoul(argv[++i], NULL, 0);
+            mw_end    = (unsigned)strtoul(argv[++i], NULL, 0);
+            mw_stride = (unsigned)strtoul(argv[++i], NULL, 0);
+            do_memwatch = 1; do_battery = 0;
         } else if (!strcmp(argv[i], "--quiet")) verbose = 0;
         else {
             fprintf(stderr,
-                    "usage: %s [--raw \"<hexbytes>\" <reply_len>] [--allow-write] [--quiet]\n"
-                    "  no args: run the read-only validation battery\n", argv[0]);
+                    "usage: %s [options]\n"
+                    "  (no args)                        read-only validation battery\n"
+                    "  --raw \"<hexbytes>\" <reply_len>   send one command\n"
+                    "  --memdump <addr> <nwords>        ARM memory hex dump (op 0x02)\n"
+                    "  --memwatch <start> <end> <stride>  sample twice, report changes\n"
+                    "  --allow-write                    permit write/reset/DMA opcodes\n"
+                    "  --quiet                          suppress per-transfer tracing\n",
+                    argv[0]);
             return 2;
         }
     }
@@ -246,7 +328,11 @@ int main(int argc, char **argv) {
 
     drain_stale_in();
 
-    if (do_battery) {
+    if (do_memdump) {
+        mem_dump(md_start, md_words);
+    } else if (do_memwatch) {
+        mem_watch(mw_start, mw_end, mw_stride);
+    } else if (do_battery) {
         battery();
     } else {
         unsigned char cmd[512];
