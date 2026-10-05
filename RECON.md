@@ -3,7 +3,18 @@
 Goal: use an AVerMedia GL310 (C835) HDMI capture card as a webcam on macOS 26.x
 (Apple Silicon), while docked. No vendor macOS driver exists past macOS 10.13.
 
-Recon date: 2026-10-05. Verdict: **tractable**, gated on one USB bus capture.
+Recon date: 2026-10-05. Verdict: **tractable**.
+
+> **Status note.** This file is the original recon. It has been superseded in two
+> places and is kept for the hardware survey and architecture plan:
+>
+> - The USB bus capture in §6 **did not work** — USBPcap cannot see this device's
+>   URBs at all (0 for 3 attempts). See `captures/NOTES.md`. It turned out not to be
+>   needed: the protocol was recovered from the driver binary instead (`RE.md`) and
+>   then **confirmed directly against the hardware** from macOS over libusb.
+> - The protocol unknowns listed in §4 are largely resolved. Current state of play
+>   lives in **`RE.md`** (command protocol, registers, what is confirmed) and
+>   **`FIRMWARE.md`** (the ARM firmware).
 
 ## 1. The device as macOS sees it
 
@@ -117,11 +128,17 @@ Driver class names reveal the I2C-attached front end:
 
 | Part | Role | Open docs |
 |---|---|---|
-| **ADV7614** | HDMI **receiver** (the input path) | datasheet + Linux `adv7604.c` covers this family |
+| **ADV7441** | HDMI **receiver** — the input path *on this board* | public datasheet |
+| **AD9889** | HDMI transmitter — the passthrough output | public datasheet |
+| ADV7614 | HDMI receiver (other boards in the shared driver) | datasheet + Linux `adv7604.c` |
 | ADV7401 | multiformat video decoder (analog/component in) | public datasheet |
-| ADV7441 | video + HDMI decoder | public datasheet |
 | ADV7393 | video encoder / DAC (analog out) | public datasheet |
-| AD9889 | HDMI transmitter (passthrough out) | public datasheet |
+
+> **Corrected 2026-10-05.** An earlier revision of this file guessed the ADV7614 as
+> the input. The Windows driver log settles it for the C835: `CADI7441_InitDevice`
+> is the HDMI receiver and `CADI9889_InitDevice` the passthrough transmitter. The
+> other parts exist in this shared driver for sibling products. See
+> `captures/NOTES.md`.
 
 This is a large de-risking: "which registers do I poke to get HDMI sync, read the
 input resolution, and check HDCP" is answered by public datasheets and existing
@@ -147,7 +164,7 @@ EMULATION_ON / EMULATION_OFF
 Plus a thin USB layer: `QLUSBFW_I2C_READ`, `QLUSBFW_SW_I2C_READ`.
 
 Bring-up therefore looks like: reset ARM → download video FW to its load address →
-download audio FW → release reset → bring up ADV7614 over the I2C bridge → poll
+download audio FW → release reset → bring up ADV7441 over the I2C bridge → poll
 HDMI status for resolution/HDCP → issue encoder-start via `FIRMWARE_COMMAND` →
 drain H.264 from a bulk IN pipe.
 
@@ -180,7 +197,7 @@ the protocol is the only hard part: one protocol core, two thin output sinks.
                  │  · claim iface 0, bulk 0x02/0x81      │
                  │  · firmware upload (ARM + DSP)        │
                  │  · QPCODEC_DIAG_* primitives          │
-                 │  · ADV7614 bring-up via I2C bridge    │
+                 │  · ADV7441 bring-up via I2C bridge    │
                  │  · HDMI status poll (res / HDCP)      │
                  │  · drain H.264 Annex-B                │
                  └───────────────┬───────────────────────┘

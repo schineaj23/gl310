@@ -5,9 +5,14 @@ using the `CUsbCntl_*` functions located through their own debug strings. The DM
 mailbox behaviour was cross-checked against `captures/gl310-bringup-debugview.log`
 (take 2, a clean restart). RVAs are given so every claim can be re-checked.
 
-USBPcap can't see this device's URBs on Windows (see `captures/NOTES.md`), so nothing
-here has been confirmed on the wire yet. The layouts below come from the code; they are
-not guesses from traffic.
+USBPcap can't see this device's URBs on Windows (see `captures/NOTES.md`), so the
+layouts below were read out of the code rather than off the wire.
+
+> **Update 2026-10-05 — the transport and the read opcodes are now confirmed on real
+> hardware**, from macOS over libusb, with no firmware loaded. See
+> [§ Confirmed on hardware](#confirmed-on-hardware). USBPcap turned out not to be
+> needed for this part: the device answers our own commands, so it validates the
+> framing itself. Reproduce with `tools/gl310probe.c`.
 
 ## Endpoints
 
@@ -107,12 +112,82 @@ host->ARM  REG_TO_ARM_MESSAGE_STATUS(0x1) REG_TO_ARM_MESSAGE(0x30)       (ack)
 The mailbox registers themselves (`QPFWAPI_SendMessageToARM` 5a8c0,
 `QPFWAPI_AckARMMessage` 5ae40, and the ARM->host poll) are the next thing to decode.
 
+## Confirmed on hardware
+
+Run on macOS 26.6.2 (arm64) against the card on the dock, **no firmware loaded**,
+using `tools/gl310probe.c` (read-only by default; writes need `--allow-write`).
+libusb claims interface 0 with no fight — nothing else binds a class-0xFF interface.
+
+| claim | result |
+|---|---|
+| `GenericCmd` = bulk OUT `0x04`, bulk IN `0x83`, no framing | **confirmed** |
+| header `{u8 op, u8 sub, u16 count, u32 arg}` | **confirmed** |
+| `0x14` GetUSBSpeed → 1 byte | **confirmed**, returns `0x03`, stable |
+| `0x01` RegisterRead → 4 bytes | **confirmed** |
+| `0x01` RegisterReadEx, reply scales `4·count` | **confirmed**, `count=4` → exactly 16 B |
+| `count` semantics | **confirmed**: `ReadEx(0x0,4)`'s first 8 bytes equal `Read(0x0)` ‖ `Read(0x4)` |
+| replies stay aligned with commands | **confirmed**, repeated identical cmds give identical replies |
+| `accessMode(1)` ⇒ addresses go out raw | **consistent**, raw register numbers read fine |
+| `0x00` ReadHciRegister → 1 byte | transport works, **returns `0xff` for every register** |
+| `0x0C` SWI2CWriteThenRead → rlen+1 | transport works, **I²C transfer fails, status `0x06`** |
+| `0x08` I2CWriteThenRead | transport works, returns `00 00` |
+
+### We are talking to live silicon, not a canned reply
+
+A 128-byte `RegisterReadEx` of 32 registers from `0x0`, read twice 5 s apart, differs in
+**exactly two words** — `reg[5]` at `0x14` and `reg[7]` at `0x1c`:
+
+```
+reg[5] 0x5621cf3f -> 0x90c64456   delta 983,856,407 over 5.085 s  => 193.47 MHz
+reg[7] 0x55fe93ff -> 0x909e4d9d   delta 983,546,270 over 5.085 s  => 193.41 MHz
+```
+
+Two independent free-running counters on the same ~193.4 MHz clock, wrapping every
+22.2 s, while the other 30 registers stay byte-identical. `reg[1] = 0x000b6c7d` is
+stable across every read (an ID/version, not a counter), and `reg[11] = 0x45433210`
+looks like a hardwired signature.
+
+`RegisterRead(0x0)` and `RegisterRead(0x100000)` return identical values, so the
+register window aliases — consistent with the driver's `regBase 0x100000`.
+
+### `0x600` control page, read live
+
+```
+0x0600 = 0x00000009     0x0618 = 0x0000ef1f     0x06c8 = 0x00000000  mbox ack
+0x0610 = 0x00000000  GPIO dir     0x061c = 0xd4000000     0x06cc = 0x00000000  TO_ARM_MESSAGE
+0x0614 = 0x00000000  GPIO val     0x0630 = 0x00222200     0x06f8 = 0x00000008
+0x0634 = 0x00000006     0x06ac = 0x06000000     0x06fc = 0x0000000a  TO_ARM_STATUS
+```
+
+### Registers recovered from the .sys
+
+Found with `tools/sysmap.py`, which indexes the driver by `.pdata` function bounds
+plus the debug string each function prints about itself.
+
+| register | source function (RVA) | meaning |
+|---|---|---|
+| `0x610` | `CQLCodec_SetGPIODefaults` (`0x4c3a0`) | GPIO direction |
+| `0x614` | `CQLCodec_SetGPIODefaults` (`0x4c3a0`) | GPIO value |
+| `0x6cc` | `QPFWAPI_SendMessageToARM` (`0x5a8c0`) | host→ARM message |
+| `0x6fc` | `QPFWAPI_SendMessageToARM` (`0x5a8c0`) | host→ARM status / doorbell |
+| `0x6c8` | `QPFWAPI_AckARMMessage` (`0x5ae40`) | ARM message ack |
+
+`SetGPIODefaults` is only 183 bytes and reduces to two register writes:
+`RegisterWrite(0x610, this->dir)` then `RegisterWrite(0x614, this->val)`, with the log
+showing `dir 0 val 0`.
+
+**GPIO is not what blocks SW-I²C.** Reading `0x610`/`0x614` live shows both are
+*already* `0`, so `SetGPIODefaults` would be a no-op. The real reason is that SW-I²C
+transfers are serviced by the ARM firmware — see `FIRMWARE.md`.
+
 ## Still to do
 
-- Register addresses for the mailbox (REG_TO_ARM_MESSAGE*, ARM->host message and status).
-- The register sequence in QPHCI_ReInit and InitializeMemory (DDR bring-up).
+- The register sequence in `QPHCI_ReInit` (`0x4aca0`, 811 B) and
+  `CQLCodec_InitializeMemory` (`0x4b930`, 2306 B) — **DDR bring-up, the gating
+  unknown.** Nothing else can proceed until firmware can be written to DRAM.
+  Both are now directly readable: `python3 tools/sysmap.py show QPHCI_ReInit`.
+- Why `ReadHciRegister` returns `0xff` — presumably HCI is dark until `QPHCI_ReInit`.
+- Why `0x0C` SW-I²C returns status `0x06`; decode `QPPFMGetAttr` in the firmware.
 - The meaning of the 1-byte reply to the DMA command (status? ready?).
 - The encoder start/stop message codes (`CEncoderTask_*` / `QPFWENCAPI_*`).
-- Confirm on hardware: `GetUSBSpeed` (`0x14`) and `ReadHciRegister` (`0x00`) are harmless
-  reads. They should answer even before any firmware is loaded, because the driver issues
-  HCI accesses before the download. That makes them a good first libusb test on the Mac.
+- The ARM→host message/status registers (we have the host→ARM side).
