@@ -1,0 +1,884 @@
+<title>GL310 Bus Capture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground:      #EDF1F6;
+    --surface:     #FFFFFF;
+    --surface-2:   #E2E8F0;
+    --surface-3:   #D3DBE6;
+    --ink:         #141E29;
+    --ink-2:       #4A5A6B;
+    --ink-3:       #78889A;
+    --rule:        #CBD5E1;
+    --rule-strong: #A9B7C7;
+    --out:         #B4531C;
+    --out-bg:      #F8E9DD;
+    --in:          #0E6E8C;
+    --in-bg:       #DDEDF3;
+    --ok:          #1C7A4C;
+    --ok-bg:       #DCEFE4;
+    --warn:        #8A6000;
+    --warn-bg:     #F8EED2;
+    --crit:        #A32C28;
+    --crit-bg:     #F8E1E0;
+    --shadow:      0 1px 2px rgba(20,30,41,.07), 0 4px 14px rgba(20,30,41,.05);
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, Segoe UI, sans-serif;
+    --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E141B;
+      --surface:     #161F29;
+      --surface-2:   #1D2833;
+      --surface-3:   #273340;
+      --ink:         #E4EBF3;
+      --ink-2:       #A0B1C3;
+      --ink-3:       #6E7F91;
+      --rule:        #2A3744;
+      --rule-strong: #3B4A59;
+      --out:         #EA8947;
+      --out-bg:      #2E1C10;
+      --in:          #52C6EA;
+      --in-bg:       #0D2733;
+      --ok:          #51C187;
+      --ok-bg:       #0F2A1D;
+      --warn:        #DCA62B;
+      --warn-bg:     #2B2209;
+      --crit:        #EB6A64;
+      --crit-bg:     #2E1413;
+      --shadow:      0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #0E141B;
+    --surface:     #161F29;
+    --surface-2:   #1D2833;
+    --surface-3:   #273340;
+    --ink:         #E4EBF3;
+    --ink-2:       #A0B1C3;
+    --ink-3:       #6E7F91;
+    --rule:        #2A3744;
+    --rule-strong: #3B4A59;
+    --out:         #EA8947;
+    --out-bg:      #2E1C10;
+    --in:          #52C6EA;
+    --in-bg:       #0D2733;
+    --ok:          #51C187;
+    --ok-bg:       #0F2A1D;
+    --warn:        #DCA62B;
+    --warn-bg:     #2B2209;
+    --crit:        #EB6A64;
+    --crit-bg:     #2E1413;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding-inline: 20px; padding-block: 0 72px; }
+
+  /* ---------- sticky progress bar ---------- */
+  .bar {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 20;
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--rule);
+  }
+  .bar-in {
+    max-width: 920px; margin: 0 auto;
+    padding-inline: 20px; padding-block: 10px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .bar-id {
+    font-family: var(--cond); font-weight: 700; font-size: 15px;
+    letter-spacing: .02em; margin-right: auto;
+  }
+  .bar-id span { color: var(--ink-3); font-weight: 600; }
+  .track {
+    flex: 1 1 160px; min-width: 120px; height: 6px;
+    background: var(--surface-3); border-radius: 99px; overflow: hidden;
+  }
+  .track > i { display: block; height: 100%; width: 0; background: var(--out); border-radius: 99px; transition: width .25s ease; }
+  .count { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  .reset {
+    font-family: var(--sans); font-size: 12px; color: var(--ink-3);
+    background: none; border: 1px solid var(--rule); border-radius: 6px;
+    padding: 3px 9px; cursor: pointer;
+  }
+  .reset:hover { color: var(--ink); border-color: var(--rule-strong); }
+
+  /* ---------- masthead ---------- */
+  .top { padding-block: 44px 10px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 500;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--out);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--cond); font-weight: 700;
+    font-size: clamp(34px, 7vw, 52px); line-height: 1.04;
+    letter-spacing: -.015em; margin: 0 0 18px; text-wrap: balance;
+  }
+  .lede { font-size: 17px; color: var(--ink-2); max-width: 62ch; margin: 0 0 8px; }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  /* ---------- generic sections ---------- */
+  h2 {
+    font-family: var(--cond); font-weight: 700; font-size: 25px;
+    letter-spacing: -.01em; margin: 0; text-wrap: balance;
+  }
+  h3 {
+    font-family: var(--cond); font-weight: 600; font-size: 17px;
+    letter-spacing: .01em; margin: 0 0 8px;
+  }
+  p { margin: 0 0 12px; }
+  p:last-child { margin-bottom: 0; }
+  a { color: var(--in); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { text-decoration-thickness: 2px; }
+  :focus-visible { outline: 2px solid var(--out); outline-offset: 2px; border-radius: 3px; }
+
+  code {
+    font-family: var(--mono); font-size: .9em;
+    background: var(--surface-2); padding: 1px 5px; border-radius: 4px;
+    overflow-wrap: break-word;
+  }
+
+  /* ---------- reference panel ---------- */
+  .ref {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 12px; box-shadow: var(--shadow);
+    padding: 22px; margin-block: 30px 44px;
+  }
+  .ref-head {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--rule); padding-bottom: 14px; margin-bottom: 18px;
+  }
+  .ref-head h2 { font-size: 20px; }
+  .ref-head em {
+    font-family: var(--mono); font-style: normal; font-size: 12px;
+    color: var(--ink-3); letter-spacing: .02em;
+  }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(248px, 1fr)); gap: 24px; }
+
+  dl.facts { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; align-items: baseline; }
+  dl.facts dt {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--ink-3); white-space: nowrap;
+  }
+  dl.facts dd { margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  dl.facts dd b { font-weight: 600; color: var(--out); }
+
+  table.pipes { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
+  table.pipes th {
+    text-align: left; font-weight: 500; font-size: 10.5px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--ink-3);
+    padding: 0 8px 7px 0; border-bottom: 1px solid var(--rule);
+  }
+  table.pipes td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--rule); font-variant-numeric: tabular-nums; }
+  table.pipes tr:last-child td { border-bottom: none; }
+  .dir {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-weight: 600; font-size: 11px; letter-spacing: .05em;
+    padding: 1px 7px; border-radius: 4px;
+  }
+  .dir.o { color: var(--out); background: var(--out-bg); }
+  .dir.i { color: var(--in);  background: var(--in-bg); }
+  .scroller { overflow-x: auto; }
+
+  /* ---------- callouts ---------- */
+  .note {
+    border-radius: 10px; padding: 15px 17px; margin-block: 18px;
+    border: 1px solid var(--rule); background: var(--surface);
+    font-size: 14.5px;
+  }
+  .note > .tag {
+    display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    letter-spacing: .1em; text-transform: uppercase; margin-bottom: 7px;
+  }
+  .note.crit { background: var(--crit-bg); border-color: color-mix(in srgb, var(--crit) 36%, transparent); }
+  .note.crit > .tag { color: var(--crit); }
+  .note.warn { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 36%, transparent); }
+  .note.warn > .tag { color: var(--warn); }
+  .note.tip  { background: var(--in-bg);  border-color: color-mix(in srgb, var(--in) 32%, transparent); }
+  .note.tip  > .tag { color: var(--in); }
+
+  /* ---------- stages ---------- */
+  .stage { margin-block: 40px; }
+  .stage-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 6px; }
+  .stage-num {
+    flex: none; font-family: var(--mono); font-size: 12px; font-weight: 600;
+    color: var(--out); background: var(--out-bg);
+    border-radius: 7px; padding: 4px 9px; margin-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stage-why { color: var(--ink-2); font-size: 14.5px; margin: 4px 0 0; max-width: 62ch; }
+
+  ol.steps { list-style: none; margin: 18px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  ol.steps > li {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 14px 16px;
+    display: grid; grid-template-columns: auto 1fr; gap: 12px;
+    align-items: start;
+  }
+  ol.steps > li:has(input:checked) { background: var(--surface-2); border-color: var(--rule); }
+  ol.steps > li:has(input:checked) .step-body { color: var(--ink-3); }
+  ol.steps > li:has(input:checked) .step-body strong { color: var(--ink-2); }
+  input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 18px; height: 18px; margin: 3px 0 0; flex: none;
+    border: 1.5px solid var(--rule-strong); border-radius: 5px;
+    background: var(--surface); cursor: pointer; position: relative;
+    transition: background .12s, border-color .12s;
+  }
+  input[type="checkbox"]:checked { background: var(--ok); border-color: var(--ok); }
+  input[type="checkbox"]:checked::after {
+    content: ""; position: absolute; left: 5px; top: 1.5px;
+    width: 5px; height: 10px; border: solid #fff; border-width: 0 2px 2px 0;
+    transform: rotate(42deg);
+  }
+  .step-body { min-width: 0; }
+  .step-body > :first-child { margin-top: 0; }
+  .step-body strong { font-weight: 600; }
+
+  /* ---------- command blocks ---------- */
+  .cmd {
+    position: relative; margin-block: 10px;
+    background: var(--surface-2); border: 1px solid var(--rule);
+    border-radius: 8px; display: flex; align-items: stretch; gap: 0;
+  }
+  .cmd > pre {
+    margin: 0; padding: 10px 12px; overflow-x: auto; flex: 1 1 auto; min-width: 0;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    color: var(--ink); white-space: pre; tab-size: 2;
+  }
+  .cmd > button {
+    flex: none; align-self: stretch;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-3); background: none;
+    border: none; border-left: 1px solid var(--rule);
+    padding-inline: 11px; cursor: pointer; border-radius: 0 8px 8px 0;
+  }
+  .cmd > button:hover { color: var(--ink); background: var(--surface-3); }
+  .cmd > button.done { color: var(--ok); }
+
+  .path {
+    font-family: var(--mono); font-size: 12.5px;
+    background: var(--surface-2); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 7px 10px; margin-block: 9px;
+    overflow-x: auto; white-space: nowrap;
+  }
+
+  ul.plain { margin: 10px 0; padding-left: 20px; }
+  ul.plain li { margin-bottom: 5px; }
+
+  /* ---------- deliverables ---------- */
+  .goods { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-top: 18px; }
+  .good {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 15px 16px;
+  }
+  .good .fn {
+    display: block; font-family: var(--mono); font-size: 13px; font-weight: 600;
+    color: var(--out); margin-bottom: 6px; overflow-wrap: anywhere;
+  }
+  .good p { font-size: 13.5px; color: var(--ink-2); }
+
+  /* ---------- faq ---------- */
+  details {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 13px 16px; margin-bottom: 9px;
+  }
+  details[open] { border-color: var(--rule-strong); }
+  summary {
+    cursor: pointer; font-weight: 600; font-family: var(--cond);
+    font-size: 16.5px; letter-spacing: .01em; list-style: none;
+    display: flex; gap: 9px; align-items: baseline;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "+"; font-family: var(--mono); color: var(--out);
+    font-weight: 600; flex: none;
+  }
+  details[open] summary::before { content: "\2013"; }
+  details .inner { padding-top: 11px; font-size: 14.5px; color: var(--ink-2); }
+  details .inner strong { color: var(--ink); }
+
+  hr.sep { border: none; border-top: 1px solid var(--rule); margin-block: 44px; }
+
+  footer.end {
+    margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--rule);
+    font-size: 13.5px; color: var(--ink-3);
+  }
+  footer.end code { font-size: 12.5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+  @media (max-width: 560px) {
+    .stage-head { gap: 10px; }
+    ol.steps > li { padding: 12px 13px; gap: 10px; }
+    .ref { padding: 17px; }
+  }
+</style>
+
+<div class="bar">
+  <div class="bar-in">
+    <div class="bar-id">GL310 <span>&middot; 07ca:c835</span></div>
+    <div class="track"><i id="fill"></i></div>
+    <div class="count" id="count">0 / 0</div>
+    <button class="reset" id="reset" type="button">Reset</button>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <div class="top">
+    <p class="eyebrow">Windows-side procedure &middot; one sitting</p>
+    <h1>Capturing the GL310 on the wire</h1>
+    <p class="lede">
+      The AVerMedia GL310 is a <strong>vendor-specific</strong> USB device &mdash; interface class 255, four
+      bulk pipes, no isochronous endpoints, no UVC. Nothing on macOS or Linux can bind to it. But AVerMedia's
+      Windows driver is a <strong>checked build</strong> that narrates itself, and it ships the device's ARM and
+      DSP firmware <strong>unencrypted</strong>.
+    </p>
+    <p class="lede">
+      So we let the Windows driver do the bring-up once, with a protocol analyser underneath it. This page is
+      the procedure for that. The output is two capture files and a log &mdash; enough to write the real driver.
+    </p>
+  </div>
+
+  <div class="ref">
+    <div class="ref-head">
+      <h2>Device fingerprint</h2>
+      <em>cross-check the trace against this</em>
+    </div>
+    <div class="grid2">
+      <div>
+        <h3>Identity</h3>
+        <dl class="facts">
+          <dt>VID:PID</dt><dd><b>07ca:c835</b></dd>
+          <dt>Sibling</dt><dd>07ca:d835</dd>
+          <dt>Interface</dt><dd>0 &middot; class <b>255</b> / 0 / 0</dd>
+          <dt>Speed</dt><dd>480 Mbps (USB 2.0 HS)</dd>
+          <dt>Encoder</dt><dd>QPixel QL201</dd>
+          <dt>HDMI in</dt><dd>ADV7614</dd>
+          <dt>Driver</dt><dd>AVer330USB.sys</dd>
+        </dl>
+      </div>
+      <div>
+        <h3>Endpoint map</h3>
+        <div class="scroller">
+          <table class="pipes">
+            <thead>
+              <tr><th>EP</th><th>Dir</th><th>Type</th><th>wMaxPacket</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>0x02</td><td><span class="dir o">&rarr; OUT</span></td><td>BULK</td><td>512</td></tr>
+              <tr><td>0x04</td><td><span class="dir o">&rarr; OUT</span></td><td>BULK</td><td>512</td></tr>
+              <tr><td>0x81</td><td><span class="dir i">&larr; IN</span></td><td>BULK</td><td>512</td></tr>
+              <tr><td>0x83</td><td><span class="dir i">&larr; IN</span></td><td>BULK</td><td>512</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="note tip" style="margin-bottom:0">
+      <span class="tag">The magic bytes that unlock the trace</span>
+      The firmware blobs are plain images, so their opening bytes are a <em>searchable landmark</em> inside the
+      capture. Find them and you have found the firmware-download framing &mdash; which reveals the packet header
+      wrapping every other command.
+      <div class="cmd">
+        <pre>qpvidfwusb.bin   454,064 bytes   starts 18 f0 9f e5   (ARM32 vector table, load base 0x0)
+qpaudfwusb.bin   363,832 bytes   starts 20 20 80 0f   (DSP vector table)</pre>
+        <button type="button" data-copy>Copy</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= STAGE 1 ================= -->
+  <section class="stage">
+    <div class="stage-head">
+      <div class="stage-num">01</div>
+      <div>
+        <h2>Assemble the kit</h2>
+        <p class="stage-why">Four installs. Everything is free and none of it needs a licence.</p>
+      </div>
+    </div>
+    <ol class="steps">
+      <li>
+        <input type="checkbox" id="s1a">
+        <div class="step-body">
+          <strong>Wireshark</strong>, and during setup <strong>tick the USBPcap component</strong> &mdash; it is
+          offered in the installer's component list but is <em>off by default</em>. That one checkbox is the whole
+          capture capability.
+          <div class="path">https://www.wireshark.org/download.html</div>
+          Already have Wireshark without USBPcap? Install USBPcap standalone from
+          <a href="https://desowin.org/usbpcap/" target="_blank" rel="noopener">desowin.org/usbpcap</a>, then reboot.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s1b">
+        <div class="step-body">
+          <strong>Sysinternals DebugView</strong>. This reads the checked driver's own running commentary, which
+          is what turns an anonymous byte trace into named operations.
+          <div class="path">https://learn.microsoft.com/sysinternals/downloads/debugview</div>
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s1c">
+        <div class="step-body">
+          <strong>The GL310 driver.</strong> Use the <code>vendor/</code> copy from the repo, or the archived
+          installer. Right-click <code>AVer835_x64.inf</code> &rarr; Install, or run the bundled
+          <code>InstallTool.exe</code>. Do <em>not</em> plug the card in yet.
+          <div class="path">archive.org/details/aver-media-gl-310-usb-hd-capture-device-v-3.2802.64.40</div>
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s1d">
+        <div class="step-body">
+          <strong>Something that opens a DirectShow capture graph.</strong> OBS Studio is the easy pick (add a
+          Video Capture Device source). AVerMedia's own RECentral works too if you can still find it.
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ================= STAGE 2 ================= -->
+  <section class="stage">
+    <div class="stage-head">
+      <div class="stage-num">02</div>
+      <div>
+        <h2>Un-gag the driver's debug output</h2>
+        <p class="stage-why">
+          Windows silently discards most <code>DbgPrint</code> output unless you raise the print filter. Skip this
+          and DebugView shows you an empty window while the driver is talking its head off.
+        </p>
+      </div>
+    </div>
+    <ol class="steps">
+      <li>
+        <input type="checkbox" id="s2a">
+        <div class="step-body">
+          Open an <strong>Administrator</strong> Command Prompt and set the filter mask wide open:
+          <div class="cmd">
+            <pre>reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Debug Print Filter" /v DEFAULT /t REG_DWORD /d 0xFFFFFFFF /f</pre>
+            <button type="button" data-copy>Copy</button>
+          </div>
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s2b">
+        <div class="step-body">
+          <strong>Reboot.</strong> The mask is read at boot; nothing changes until you do.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s2c">
+        <div class="step-body">
+          Launch <strong>DebugView as Administrator</strong>, then in the <em>Capture</em> menu enable
+          <strong>Capture Kernel</strong> and <strong>Enable Verbose Kernel Output</strong>. Leave
+          <em>Capture Win32</em> on as well. Confirm lines appear when you plug any USB device in.
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ================= STAGE 3 ================= -->
+  <section class="stage">
+    <div class="stage-head">
+      <div class="stage-num">03</div>
+      <div>
+        <h2>Find which root hub the card lives on</h2>
+        <p class="stage-why">
+          USBPcap taps a <em>root hub</em>, not a device, and a PC has several. You have to learn the card's hub
+          while it is plugged in &mdash; then unplug it, because the capture must already be running before it
+          appears.
+        </p>
+      </div>
+    </div>
+    <ol class="steps">
+      <li>
+        <input type="checkbox" id="s3a">
+        <div class="step-body">
+          Plug the GL310 into a port you can reach easily, <strong>directly into the PC</strong> &mdash; not
+          through a hub or monitor. Let Windows finish installing it.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s3b">
+        <div class="step-body">
+          Open Wireshark. In the interface list you will see <code>\\.\USBPcap1</code>,
+          <code>\\.\USBPcap2</code>&hellip; Click the <strong>gear / capture-options</strong> icon beside each and
+          read the device tree it shows. <strong>Note the one listing the AVerMedia device</strong> and write the
+          number down.
+          <div class="cmd">
+            <pre>Prefer the command line? This prints every hub with its attached devices:
+  "C:\Program Files\USBPcap\USBPcapCMD.exe"</pre>
+            <button type="button" data-copy>Copy</button>
+          </div>
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s3c">
+        <div class="step-body">
+          <strong>Unplug the GL310.</strong> Leave it out. Do not plug it back in until Stage 04 says so.
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ================= STAGE 4 ================= -->
+  <section class="stage">
+    <div class="stage-head">
+      <div class="stage-num">04</div>
+      <div>
+        <h2>Capture A &mdash; the cold bring-up</h2>
+        <p class="stage-why">
+          This is the valuable one. A cold plug-in makes the driver do everything from scratch: enumerate, reset
+          the ARM core, push 818 KB of firmware, bring up the ADV7614 over the I&sup2;C bridge, then start
+          encoding.
+        </p>
+      </div>
+    </div>
+
+    <div class="note crit">
+      <span class="tag">Ordering is the whole trick</span>
+      The capture must be <strong>running before the card is plugged in</strong>. The firmware download happens
+      within the first moments of the driver attaching. Plug in first and you lose the single most important part
+      of the trace, with no warning that anything is missing.
+    </div>
+
+    <ol class="steps">
+      <li>
+        <input type="checkbox" id="s4a">
+        <div class="step-body">
+          Connect your <strong>video camera's HDMI output to the GL310's input</strong> and power the camera on,
+          so there is a live signal the moment the card wakes. If your card has an HDMI passthrough port, hang a
+          monitor off it &mdash; a picture there confirms the signal independently of any software.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s4b">
+        <div class="step-body">
+          <strong>Write down exactly what the camera is outputting</strong> &mdash; resolution, frame rate,
+          progressive or interlaced. The encoder-config messages will encode these numbers, which is how we will
+          recognise them in the trace.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s4c">
+        <div class="step-body">
+          In Wireshark, select <strong>your USBPcap interface from Stage 03</strong>. In its capture options,
+          make sure the snapshot length is <strong>unlimited</strong> (or 65535) &mdash; a short snaplen silently
+          truncates bulk payloads and would clip the firmware bytes we need.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s4d">
+        <div class="step-body">
+          <strong>Start the capture.</strong> Then clear DebugView's window (<em>Edit &rarr; Clear Display</em>)
+          so the log starts clean and roughly aligned with the trace.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s4e">
+        <div class="step-body">
+          <strong>Now plug the GL310 in.</strong> Wait for Windows to settle, about ten seconds.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s4f">
+        <div class="step-body">
+          Open OBS, add a <strong>Video Capture Device</strong> source, pick the GL310, and let the preview run
+          for about <strong>fifteen seconds</strong> of live picture.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s4g">
+        <div class="step-body">
+          Close the preview, close OBS, then <strong>stop the Wireshark capture</strong>. Save as
+          <strong>pcapng</strong>:
+          <div class="path">gl310-bringup.pcapng</div>
+          In DebugView, <em>File &rarr; Save As</em>:
+          <div class="path">gl310-bringup-debugview.log</div>
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s4h">
+        <div class="step-body">
+          <strong>Sanity-check before you move on.</strong> In Wireshark's display filter box, confirm the
+          firmware actually went across the bus:
+          <div class="cmd">
+            <pre>usb.transfer_type == 0x03 &amp;&amp; usb.data_len &gt; 400</pre>
+            <button type="button" data-copy>Copy</button>
+          </div>
+          You want a long burst of large OUT writes on <code>0x02</code> shortly after enumeration. Better still,
+          <em>Edit &rarr; Find Packet</em>, set it to search <strong>Packet bytes</strong> for a <strong>Hex
+          value</strong>, and enter <code>18f09fe5</code>. A hit means the ARM firmware is in your trace and
+          Capture A is good.
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ================= STAGE 5 ================= -->
+  <section class="stage">
+    <div class="stage-head">
+      <div class="stage-num">05</div>
+      <div>
+        <h2>Capture B &mdash; streaming only</h2>
+        <p class="stage-why">
+          A second, much shorter trace with the card <em>already initialised</em>. Capture A buries the
+          start-encode handshake under 818 KB of firmware writes; Capture B isolates it by subtraction. Ten
+          minutes of work that saves hours of guessing.
+        </p>
+      </div>
+    </div>
+    <ol class="steps">
+      <li>
+        <input type="checkbox" id="s5a">
+        <div class="step-body">
+          Leave the card plugged in and initialised. Start a <strong>fresh Wireshark capture</strong> on the same
+          interface, and clear DebugView again.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s5b">
+        <div class="step-body">
+          Open OBS, start the preview, let it run <strong>five seconds</strong>, stop it. Then start it
+          <strong>a second time</strong>, five seconds, stop. Two cycles make the repeating start/stop message
+          pattern obvious instead of ambiguous.
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s5c">
+        <div class="step-body">
+          Stop and save both files:
+          <div class="path">gl310-streamonly.pcapng</div>
+          <div class="path">gl310-streamonly-debugview.log</div>
+        </div>
+      </li>
+      <li>
+        <input type="checkbox" id="s5d">
+        <div class="step-body">
+          <strong>Optional but genuinely useful:</strong> a third capture where you change one setting only
+          &mdash; drop the bitrate, or switch resolution &mdash; and note what you changed. Comparing two traces
+          that differ in one parameter is the fastest way to locate that parameter's byte offset in the mailbox
+          message.
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <hr class="sep">
+
+  <!-- ================= DELIVERABLES ================= -->
+  <section class="stage">
+    <div class="stage-head">
+      <div class="stage-num">06</div>
+      <div>
+        <h2>What comes home</h2>
+        <p class="stage-why">
+          Copy these to the Mac however you like &mdash; the pcapng files compress well. Drop them in
+          <code>~/src/gl310/captures/</code>.
+        </p>
+      </div>
+    </div>
+    <div class="goods">
+      <div class="good">
+        <span class="fn">gl310-bringup.pcapng</span>
+        <p>Cold plug-in through live preview. Yields the bulk wire format, firmware-download framing, and the
+          I&sup2;C bring-up of the ADV7614.</p>
+      </div>
+      <div class="good">
+        <span class="fn">gl310-streamonly.pcapng</span>
+        <p>Two preview cycles on an initialised card. Isolates the encoder start/stop mailbox messages.</p>
+      </div>
+      <div class="good">
+        <span class="fn">*-debugview.log</span>
+        <p>The checked driver naming its own operations, so bus bytes can be matched to functions.</p>
+      </div>
+      <div class="good">
+        <span class="fn">signal-notes.txt</span>
+        <p>Camera resolution, frame rate, scan type &mdash; plus anything you changed for a third capture.</p>
+      </div>
+    </div>
+    <div class="note tip">
+      <span class="tag">One line back to me</span>
+      Tell me whether the <code>18f09fe5</code> search in Stage 04 found a hit. That single yes/no tells me
+      whether the trace contains what the driver needs, before I start decoding anything.
+    </div>
+  </section>
+
+  <hr class="sep">
+
+  <!-- ================= TROUBLESHOOTING ================= -->
+  <section class="stage">
+    <h2 style="margin-bottom:16px">When it misbehaves</h2>
+
+    <details>
+      <summary>Windows refuses to install the driver</summary>
+      <div class="inner">
+        The package is signed (<code>aver330usb.cat</code>) through a Microsoft Third Party CA, so it normally
+        installs on Windows 10 and 11. If it is rejected, boot once with driver signature enforcement disabled:
+        hold <strong>Shift</strong> while choosing Restart, then <em>Troubleshoot &rarr; Advanced options &rarr;
+        Startup Settings &rarr; Restart</em>, and pick option <strong>7</strong>. The driver stays installed
+        afterwards; you only need the relaxed boot to get it in.
+      </div>
+    </details>
+
+    <details>
+      <summary>DebugView stays empty</summary>
+      <div class="inner">
+        Almost always Stage 02. Confirm the registry value really exists and is a <strong>DWORD named
+        DEFAULT</strong> under <em>Debug Print Filter</em>, that you <strong>rebooted</strong> after setting it,
+        and that DebugView itself is running <strong>as Administrator</strong> with <em>Capture Kernel</em>
+        ticked. Without admin rights the kernel option is greyed out entirely.
+      </div>
+    </details>
+
+    <details>
+      <summary>No USBPcap interfaces in Wireshark</summary>
+      <div class="inner">
+        USBPcap was not selected during Wireshark's install, or the machine has not rebooted since. It installs a
+        kernel filter driver, which cannot start until a reboot. Install it standalone from
+        <a href="https://desowin.org/usbpcap/" target="_blank" rel="noopener">desowin.org/usbpcap</a>, reboot,
+        and launch Wireshark as Administrator.
+      </div>
+    </details>
+
+    <details>
+      <summary>The card enumerates but OBS shows black</summary>
+      <div class="inner">
+        Check the HDMI passthrough monitor first to prove the signal is really arriving. Then watch DebugView for
+        the driver's own verdict &mdash; it prints
+        <code>HDMI information : status (%d) resolution (%d x %d) audio (%d) hdcp (%d)</code>. If
+        <strong>hdcp</strong> reads 1, the encoder will refuse to hand over frames; a camera should never assert
+        HDCP, but a console or streaming box in the chain will. If resolution reads <code>0 x 0</code>, the
+        ADV7614 never locked and the problem is upstream of the encoder.
+        <br><br>
+        Black preview is still a <em>useful</em> capture, by the way &mdash; the firmware download and I&sup2;C
+        bring-up happen regardless. Save it either way.
+      </div>
+    </details>
+
+    <details>
+      <summary>The capture file is enormous</summary>
+      <div class="inner">
+        Expected, and fine. Fifteen seconds of 1080p H.264 plus 818 KB of firmware runs to tens of megabytes.
+        Do <strong>not</strong> try to shrink it with a capture filter or a shorter snaplen &mdash; truncated
+        payloads are worse than useless, because the gaps are invisible. Compress the file afterwards instead;
+        pcapng squeezes down hard.
+      </div>
+    </details>
+
+    <details>
+      <summary>Can I skip the Windows PC and just reverse the .sys?</summary>
+      <div class="inner">
+        Partly. Static analysis of <code>AVer330USB.sys</code> recovers the command <em>vocabulary</em> &mdash; we
+        already have it, names and all, from the checked build's debug strings. What it does not recover reliably
+        is the <strong>byte-level framing</strong> on the bulk pipes, the <strong>ordering and timing</strong> of
+        bring-up, and the exact <strong>mailbox struct layout</strong>. Those three are precisely what a capture
+        hands over for free. An hour here replaces days of disassembly, and removes the guesswork that would
+        otherwise stall the driver.
+      </div>
+    </details>
+  </section>
+
+  <footer class="end">
+    Progress on this page is kept in this browser only &mdash; it will not follow you to another machine, and
+    nothing is uploaded. Device facts come from <code>ioreg</code> and a libusb descriptor dump on the Mac, plus
+    the strings and INF of AVerMedia driver <code>3.2802.64.40</code> (11 June 2020).
+  </footer>
+
+</div>
+
+<script>
+  (function () {
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('input[type="checkbox"]'));
+    var fill = document.getElementById('fill');
+    var count = document.getElementById('count');
+    var KEY = 'gl310-capture-progress';
+
+    function load() {
+      try {
+        var raw = localStorage.getItem(KEY);
+        if (!raw) return;
+        var done = JSON.parse(raw);
+        if (!done || typeof done !== 'object') return;
+        boxes.forEach(function (b) { if (done[b.id]) b.checked = true; });
+      } catch (e) { /* private window, blocked storage, bad JSON — render unchecked */ }
+    }
+
+    function save() {
+      try {
+        var done = {};
+        boxes.forEach(function (b) { if (b.checked) done[b.id] = 1; });
+        localStorage.setItem(KEY, JSON.stringify(done));
+      } catch (e) { /* non-fatal: the page works without persistence */ }
+    }
+
+    function paint() {
+      var n = boxes.filter(function (b) { return b.checked; }).length;
+      count.textContent = n + ' / ' + boxes.length;
+      fill.style.width = boxes.length ? (n / boxes.length * 100) + '%' : '0';
+      fill.style.background = (n === boxes.length && n > 0)
+        ? 'var(--ok)' : 'var(--out)';
+    }
+
+    boxes.forEach(function (b) {
+      b.addEventListener('change', function () { save(); paint(); });
+    });
+
+    document.getElementById('reset').addEventListener('click', function () {
+      boxes.forEach(function (b) { b.checked = false; });
+      save(); paint();
+    });
+
+    // copy buttons — clipboard API, falling back to selecting the text in place
+    document.querySelectorAll('.cmd > button[data-copy]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var pre = btn.parentNode.querySelector('pre');
+        if (!pre) return;
+        var text = pre.textContent;
+        var ok = function () {
+          btn.textContent = 'Copied';
+          btn.classList.add('done');
+          setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1600);
+        };
+        var fallback = function () {
+          try {
+            var r = document.createRange();
+            r.selectNodeContents(pre);
+            var sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(r);
+            btn.textContent = 'Press \u2318/Ctrl+C';
+            setTimeout(function () { btn.textContent = 'Copy'; }, 2600);
+          } catch (e) { btn.textContent = 'Select it'; }
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(ok, fallback);
+        } else {
+          fallback();
+        }
+      });
+    });
+
+    load();
+    paint();
+  })();
+</script>

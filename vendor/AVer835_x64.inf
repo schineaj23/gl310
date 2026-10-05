@@ -1,0 +1,534 @@
+;***************************************************************************
+; AVer835.inf  -- This file contains installation information for 
+;                   AVerMedia HD USB capture driver
+;               
+; Created 08/08/2012  (Creation Date)
+;
+;               
+; Copyright (c) 2012 AVerMedia TECHNOLOGIES, Inc.
+;***************************************************************************
+
+[Version]
+Signature           = "$CHICAGO$" ;all windows os
+Class               = Media
+ClassGUID           = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider            = %AVer.Provider%
+CatalogFile         = %TargetName%.cat
+DriverVer=06/11/2020,3.2802.64.40
+
+[Manufacturer]
+%AVer.Provider% = AVer.Device,NTamd64
+
+
+;----------------------------------------------------------------------------
+;                 Supported PnpIDs
+;----------------------------------------------------------------------------
+
+[AVer.Device.NTamd64]
+%AVer.DeviceDesc% = AVer.Install.NTamd64,USB\VID_07ca&PID_c835
+%AVer.DeviceDesc% = AVer.Install.NTamd64,USB\VID_07ca&PID_d835
+
+;----------------------------------------------------------------------------
+;                 Installation Entries
+;----------------------------------------------------------------------------
+
+[AVer.Install.NTamd64]
+Include     = ks.inf, kscaptur.inf, ksfilter.inf
+Needs       = KS.Registration,KSCAPTUR.Registration.NT
+AddReg      = AVer.AddReg,AVer.PinNames,AVer.AddMediaCategory.NTamd64
+CopyFiles   = AVer.CopyFiles,DSFilters.CopyFiles.NTamd64,DSFilters_x86Inx64.CopyFiles.NTamd64
+RegisterDlls= DSFilters.RegDLL.NTamd64,DSFilters_x86Inx64.RegDLL.NTamd64
+KnownFiles  = AVer.KnownFiles   
+
+
+[DestinationDirs]
+AVer.CopyFiles = 10,system32\drivers
+DSFilters.CopyFiles.NTamd64 = 11
+DSFilters_x86Inx64.CopyFiles.NTamd64 = 16425
+
+
+[AVer.DelList]
+%TargetName%.sys
+PropPage.ax
+
+[AVer.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,%TargetName%.sys
+HKR,,PageOutWhenUnopened,3,00
+HKR,,DontSuspendIfStreamsAreRunning,3,01
+
+HKLM,SOFTWARE\qpixel\ql201, "USBFriendlyName",, %AVer.DeviceDesc%
+HKLM,SOFTWARE\qpixel\ql201, "USBDecFriendlyName",, %AVer.Decoder%
+HKLM,SOFTWARE\qpixel\ql201, StartInitArmLoop,0x00010001,0
+HKLM,SOFTWARE\qpixel\ql201, EnableMiscSettings,0x00010001,0
+
+
+
+;----------------------------------------------------------------------------
+;                 Add the Property Pages
+;----------------------------------------------------------------------------
+
+
+HKCR,CLSID\%GUID.Config_Properties%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.Config_Properties%,,,
+
+
+
+HKCR,CLSID\%GUID.System_Properties%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.System_Properties%,,,
+
+
+
+HKCR,CLSID\%GUID.Video_Properties2%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.Video_Properties2%,,,
+
+
+HKCR,CLSID\%GUID.Audio_Properties%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.Audio_Properties%,,,
+
+
+HKCR,CLSID\%GUID.Coding_Properties%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.Coding_Properties%,,,
+
+HKCR,CLSID\%GUID.Diag_Properties%\InprocServer32,,,PropPage.ax
+HKCR,CLSID\%GUID.Diag_Properties%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.Diag_Properties%,,,
+
+
+
+HKCR,CLSID\%GUID.Decode_Properties2%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.Decode_Properties2%,,,
+
+
+HKCR,CLSID\%GUID.Decode_Properties2%\InprocServer32,ThreadingModel,,Both
+HKLM,%MediaSets%\%GUID.QLDEV_CONTROL_PROPERTIES%\PropertyPages\%GUID.Wizard_Properties%,,,
+
+;----------------------------------------------------------------------------
+;                 Chipset - Specific Registry Entries
+;----------------------------------------------------------------------------
+
+; Encoder Task
+;
+HKR,Encoder,EncSystemControl,0x00010001,0x2101b219
+HKR,Encoder,EncRateControl,0x00010001,0x00501f40
+HKR,Encoder,EncGopLoopFilter,0x00010001,0xf199001e
+HKR,Encoder,EncPictureResolution,0x00010001,0x02d00500
+HKR,Encoder,EncInputControl,0x00010001,0x3e7c0609
+HKR,Encoder,EncSyncMode,0x00010001,0x00000011
+HKR,Encoder,EncBitRate,0x00010001,0x1f4007d0
+HKR,Encoder,EncFilterControl,0x00010001,0x80002000
+HKR,Encoder,EncEtControl,0x00010001,0x00000000
+HKR,Encoder,EncOutPictureResolution,0x00010001,0x02d00500
+HKR,Encoder,EncBlockXferSize,0x00010001,0x00000010
+HKR,Encoder,EncAudioControlParam,0x00010001,0x21161080
+HKR,Encoder,EncAudioControlExAAC,0x00010001,0x520800f4
+HKR,Encoder,EncAudioControlExG711,0x00010001,0x00000000
+HKR,Encoder,EncAudioControlExLPCM,0x00010001,0x00000200
+HKR,Encoder,EncIndexCapFreq,0x00010001,0x00000020
+HKR,Encoder,EncMP4VideoBlockNumber,0x00010001,0x00000005
+HKR,Encoder,EncStopMode,0x00010001,0x00000000
+HKR,Encoder,EncEnableVidPadding,0x00010001,0x00000001
+HKR,Encoder,EncFunction,0x00010001,0x80000011
+HKR,Encoder,EncLinkVIn,0x00010001,0x00000000
+HKR,Encoder,EncLinkVOut,0x00010001,0x00000001
+HKR,Encoder,EncLinkAIn,0x00010001,0x00000000
+HKR,Encoder,EncLinkAOut,0x00010001,0x00000001
+HKR,Encoder,EncLargeCompressBufferControl,0x00010001,19000
+HKR,Encoder,EncMjpegQuality,0x00010001,11
+HKR,Encoder,EncUseSWPTS,0x00010001,1
+HKR,Encoder,EncEnableAVDiscardControl,0x00010001,2
+
+; Decoder
+;
+HKR,Decoder,streamID,0x00010001,0x80000013
+HKR,Decoder,outputMode,0x00010001,0x00000001
+HKR,Decoder,decodeResolution,0x00010001,0x02d00500
+HKR,Decoder,decStopMode,0x00010001,0x00000000
+HKR,Decoder,decStopDispMode,0x00010001,0x00000000
+HKR,Decoder,decDispMode,0x00010001,0x00000003
+HKR,Decoder,decDispTVSystem,0x00010001,0x00000003
+HKR,Decoder,decDispInputSize,0x00010001,0x02d00500
+HKR,Decoder,decDispOutputSize,0x00010001,0x02d00500
+HKR,Decoder,decDispInputOrigin,0x00010001,0x00000000
+HKR,Decoder,decDispOutputOrigin,0x00010001,0x00000000
+HKR,Decoder,decXferMode,0x00010001,0x00000001
+HKR,Decoder,decXferMinimumSize,0x00010001,0x00000000
+HKR,Decoder,DecFunction,0x00010001,0x80000101
+HKR,Decoder,DecLinkVIn,0x00010001,0x00000001
+HKR,Decoder,DecLinkVOut,0x00010001,0x00000001
+HKR,Decoder,DecLinkAIn,0x00010001,0x00000001
+HKR,Decoder,DecLinkAOut,0x00010001,0x00000001
+
+
+; Platform
+;
+HKR,Platform,DownloadFW,0x00010001,1
+HKR,Platform,FwFixedMode,0x00010001,1 
+HKR,Platform,DontInitHW,0x00010001,0
+HKR,Platform,UseExternalFW,0x00010001,1
+HKR,Platform,VideoFirmware,,\SystemRoot\system32\drivers\qpvidfwusb.bin
+HKR,Platform,AudioFirmware,,\SystemRoot\system32\drivers\qpaudfwusb.bin
+HKR,Platform,AccessMode,0x00010001,1	
+HKR,Platform,BusType,0x00010001,0
+HKR,Platform,MemType,0x00010001,1	      
+HKR,Platform,MemSize,0x00010001,512
+HKR,Platform,ChipType,0x00010001,8	
+HKR,Platform,VIUMode,0x00010001,2
+HKR,Platform,VIUFormat,0x00010001,0	
+HKR,Platform,VIUStartPixel,0x00010001,0
+HKR,Platform,VIUStartLine,0x00010001,0
+HKR,Platform,VIUClkEdge,0x00010001,0
+HKR,Platform,VIUSyncCode1,0x00010001,0xf1f1f1da
+HKR,Platform,VIUSyncCode2,0x00010001,0xb6f1f1b6
+HKR,Platform,AI_msb,0x00010001,1
+HKR,Platform,AI_lrclk,0x00010001,1
+HKR,Platform,AI_bclk,0x00010001,0
+HKR,Platform,AI_i2s,0x00010001,1
+HKR,Platform,AI_rj,0x00010001,0
+HKR,Platform,VOEnable,0x00010001,0
+HKR,Platform,VOUMode,0x00010001,0
+HKR,Platform,VOUStartPixel,0x00010001,1
+HKR,Platform,VOUStartLine,0x00010001,0
+HKR,Platform,AOEnable,0x00010001,1
+HKR,Platform,AO_msb,0x00010001,1
+HKR,Platform,AO_lrclk,0x00010001,1
+HKR,Platform,AO_bclk,0x00010001,0
+HKR,Platform,AO_i2s,0x00010001,1
+HKR,Platform,AO_rj,0x00010001,1
+HKR,Platform,AO_s,0x00010001,0
+HKR,Platform,VerFwAPI,0x00010001,1
+;HKR,Platform,GPIODirections,0x00010001,0x00000000  ; don't set the default value      
+;HKR,Platform,GPIOValues,0x00010001,0x00000000      ; don't set the default value       
+HKR,Platform,VidInputType,0x00010001,11	
+HKR,Platform,VidOutputType,0x00010001,5	
+HKR,Platform,VidOutputStd,0x00010001,0x8
+HKR,Platform,TunerType,0x00010001,0
+HKR,Platform,TVAudioType,0x00010001,0
+HKR,Platform,AudioCodecType,0x00010001,0
+HKR,Platform,I2CType,0x00010001,1
+HKR,Platform,I2CGPIOClk,0x00010001,14
+HKR,Platform,I2CGPIOData,0x00010001,15
+HKR,Platform,I2CExType,0x00010001,6
+HKR,Platform,USBPipeCmdWr,0x00010001,1
+HKR,Platform,USBPipeCmdRd,0x00010001,3
+HKR,Platform,USBPipeDmaWr,0x00010001,0
+HKR,Platform,USBPipeDmaRd,0x00010001,2
+HKR,Platform,ErrorRecovery,0x00010001,2
+HKR,Platform,RestoreUSBMode,0x00010001,1
+HKR,Platform,ISPmode,0x00010001,0 
+HKR,Platform,USBProject,0x00010001,0xc835
+HKR,Platform,DefaultBrightness,0x00010001,128
+HKR,Platform,DefaultContrast,0x00010001,62
+HKR,Platform,MaxAnalogVolume,0x00010001,11
+HKR,Platform,MinAnalogVolume,0x00010001,1
+HKR,Platform,FilterOutHDCPContent,0x00010001,0
+HKR,Platform,EncoderVolume,0x00010001,8
+; USB
+;
+HKR,USB,USBDConfigSelect,0x00010001,1	; config 1
+;----------------------------------------------------------------------------
+;                 Board - Specific Registry Entries
+;----------------------------------------------------------------------------
+
+; AVer USB series configuration
+;
+HKR,Platform,USBMcuAddr,0x00010001,0x0000002B
+HKR,Platform,USBMcuRst,0x00010001,5
+
+
+;----------------------------------------------------------------------------
+;                 Sources, Copy Files
+;----------------------------------------------------------------------------
+
+[AVer.AddMediaCategory.NTamd64]
+HKCR,Wow6432Node\%ActiveMovieCategories%\%GUID.DataCompressor%,CLSID,,%GUID.DataCompressor%
+HKCR,Wow6432Node\%ActiveMovieCategories%\%GUID.DataCompressor%,FriendlyName,,%Category_DataCompressor%
+
+[AVer.CopyFiles]
+%TargetName%.sys
+qpvidfwusb.bin
+qpaudfwusb.bin
+
+[DSFilters.CopyFiles.NTamd64]
+
+[DSFilters_x86Inx64.CopyFiles.NTamd64]
+PropPage.ax
+
+
+[DSFilters.RegDLL.NTamd64]
+
+[DSFilters_x86Inx64.RegDLL.NTamd64]
+16425,,PropPage.ax,1
+
+[AVer.KnownFiles]
+%TargetName%.sys=safe
+
+[AVer.Install.NTamd64.Interfaces]
+AddInterface=%KSCATEGORY_CROSSBAR%,%XBARReferenceGUID%,VideoCrossbar,
+AddInterface=%KSCATEGORY_DATACOMPRESSOR%,%DataCompressorReferenceGuid%,VideoCompressor,
+AddInterface=%KSCATEGORY_CAPTURE%,%CaptureReferenceGuid%,VideoCapture,
+AddInterface=%KSCATEGORY_ENCODER%,%AnalogEncoderReferenceGuid%,AnalogEncoder,
+AddInterface=%KSCATEGORY_MULTIPLEXER%,%AnalogEncoderReferenceGuid%,AnalogEncoder,
+
+;----------------------------------------------------------------------------
+;                General Registry Entries
+;----------------------------------------------------------------------------
+[VideoCrossbar]
+AddReg=VideoXBar.AddReg
+
+[VideoTvAudio]
+AddReg=VideoTvAudio.AddReg
+
+[VideoEncoder]
+AddReg=VideoEncoder.AddReg
+
+[VideoCompressor]
+AddReg=VideoCompressor.AddReg
+
+[VideoCapture]
+AddReg=VideoCapture.AddReg
+
+[AnalogEncoder]
+AddReg=AnalogEncoder.AddReg
+
+
+
+
+[VideoXBar.AddReg]
+HKR,,CLSID,,%ProxyXBar.CLSID%
+HKR,,FriendlyName,,%AVer.Crossbar%
+
+
+[VideoCapture.AddReg]
+HKR,,CLSID,,%ProxyAnlgCap.CLSID%
+HKR,,FriendlyName,,%AVer.Capture%
+
+
+[AnalogEncoder.AddReg]
+HKR,,CLSID,,%ProxyAnlgEncoder.CLSID%
+HKR,,FriendlyName,,%AVer.AnlgEncoder%
+HKR,Interfaces\{B43C4EEC-8C32-4791-9102-508ADA5EE8E7},,,
+HKR,Interfaces\{b05dabd9-56e5-4fdc-afa4-8a47e91f1c9c},,,
+HKR,Capabilities,,,
+HKR,Capabilities,"{BB4FAA02-596C-4129-8FB3-74E75421FA02}",0x00010001,1
+HKR,,Merit,1,00,00,40,00
+ 
+HKCR,%ActiveMovieCategories%\%GUID.Encoder%,CLSID,,%GUID.Encoder%
+HKCR,%ActiveMovieCategories%\%GUID.Encoder%,FriendlyName,,%Category_Encoders%
+HKCR,%ActiveMovieCategories%\%GUID.Multiplexer%,CLSID,,%GUID.Multiplexer%
+HKCR,%ActiveMovieCategories%\%GUID.Multiplexer%,FriendlyName,,%Category_Multiplexers%
+
+HKLM,%MediaCategories%\%GUID.Encoder%,Name,,%Node.Encoder%
+HKLM,%MediaCategories%\%GUID.Encoder%,Display,1,00,00,00,00
+HKLM,%MediaCategories%\%GUID.Multiplexer%,Name,,%Node.Multiplexer%
+HKLM,%MediaCategories%\%GUID.Multiplexer%,Display,1,00,00,00,00
+
+HKLM,%MediaInterfaces%\{0A7AF963-6805-4f99-B284-29B680975542},,,"Copy Protect Notification Filter"
+HKLM,%MediaInterfaces%\{0A7AF963-6805-4f99-B284-29B680975542},IID,1,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+
+[VideoTvAudio.AddReg]
+HKR,,CLSID,,%ProxyTvAudio.CLSID%
+HKR,,FriendlyName,,%AVer.TvAudio%
+
+
+[VideoEncoder.AddReg]
+HKR,,CLSID,,%ProxyEncoder.CLSID%
+HKR,,FriendlyName,,%AVer.Encoder%
+HKR,Interfaces\{B43C4EEC-8C32-4791-9102-508ADA5EE8E7},,,
+
+
+HKCR,%ActiveMovieCategories%\%GUID.Encoder%,CLSID,,%GUID.Encoder%
+HKCR,%ActiveMovieCategories%\%GUID.Encoder%,FriendlyName,,%Category_Encoders%
+HKCR,%ActiveMovieCategories%\%GUID.Multiplexer%,CLSID,,%GUID.Multiplexer%
+HKCR,%ActiveMovieCategories%\%GUID.Multiplexer%,FriendlyName,,%Category_Multiplexers%
+
+HKLM,%MediaCategories%\%GUID.Encoder%,Name,,%Node.Encoder%
+HKLM,%MediaCategories%\%GUID.Encoder%,Display,1,00,00,00,00
+HKLM,%MediaCategories%\%GUID.Multiplexer%,Name,,%Node.Multiplexer%
+HKLM,%MediaCategories%\%GUID.Multiplexer%,Display,1,00,00,00,00
+
+
+[VideoCompressor.AddReg]
+HKR,,CLSID,,%ProxyEncoder.CLSID%
+HKR,,FriendlyName,,%AVer.DataCompressor%
+
+
+
+HKLM,%MediaCategories%\%GUID.DataCompressor%,Name,,%Node.Compressor%
+HKLM,%MediaCategories%\%GUID.DataCompressor%,Display,1,00,00,00,00
+
+;----------------------------------------------------------------------------
+;                 Services
+;----------------------------------------------------------------------------
+
+[AVer.Install.NTamd64.Services]
+AddService = %TargetName%,0x00000002,AVer.ServiceInstall
+
+
+
+[AVer.ServiceInstall]
+DisplayName   = %TargetName%
+ServiceType   = %SERVICE_KERNEL_DRIVER%
+StartType     = %SERVICE_DEMAND_START%
+ErrorControl  = %SERVICE_ERROR_NORMAL%
+ServiceBinary = %12%\%TargetName%.sys
+
+[AVer.PinNames]
+HKLM,%MediaCategories%\%GUID.AVer_VIDEO_OUT%,Name,,%Pin.AVer_VIDEO_OUT%
+HKLM,%MediaCategories%\%GUID.AVer_INDEX_OUT%,Name,,%Pin.AVer_INDEX_OUT%
+HKLM,%MediaCategories%\%GUID.AVer_YUV_OUT%,Name,,%Pin.AVer_YUV_OUT%
+HKLM,%MediaCategories%\%GUID.AVer_AUDIO_OUT%,Name,,%Pin.AVer_AUDIO_OUT%
+HKLM,%MediaCategories%\%GUID.AVer_PCM_OUT%,Name,,%Pin.AVer_PCM_OUT%
+HKLM,%MediaCategories%\%GUID.AVer_VIDEO_IN%,Name,,%Pin.AVer_VIDEO_IN%
+HKLM,%MediaCategories%\%GUID.AVer_YUV_IN%,Name,,%Pin.AVer_YUV_IN%
+HKLM,%MediaCategories%\%GUID.AVer_AUDIO_ANALOG_IN%,Name,,%Pin.AVer_AUDIO_ANALOG_IN%
+HKLM,%MediaCategories%\%GUID.AVer_VIRTUAL_PIN%,Name,,%Pin.AVer_VIRTUAL_PIN%
+HKLM,%MediaCategories%\%GUID.AVer_VIRTUAL_VIDEO_OUT%,Name,,%Pin.AVer_VIRTUAL_VIDEO_OUT%
+HKLM,%MediaCategories%\%GUID.AVer_VIRTUAL_VIDEO_IN%,Name,,%Pin.AVer_VIRTUAL_VIDEO_IN%
+HKLM,%MediaCategories%\%GUID.AVer_PCM_IN%,Name,,%Pin.AVer_PCM_IN%
+
+[SourceDisksNames]
+1=%AVer.InstallationDir%,,,
+2=%AVer.InstallationDir%,,,
+
+[SourceDisksNames.amd64]
+1=%AVer.InstallationDir%,,,
+2=%AVer.InstallationDir%,,,
+
+[SourceDisksFiles]
+AVer330USB.sys=1
+qpvidfwusb.bin=2
+qpaudfwusb.bin=2
+PropPage.ax=2
+
+;---------------------------------------------------------------
+;                 Strings
+;---------------------------------------------------------------
+
+[Strings]
+
+;----------------
+; Non-Localizable
+;----------------
+
+SERVICE_KERNEL_DRIVER=1
+SERVICE_AUTO_START=2
+SERVICE_DEMAND_START=3
+SERVICE_ERROR_NORMAL=1
+;REG_EXPAND_SZ=0x00020000
+;REG_DWORD=0x00010001
+
+
+ProxyDecomp.CLSID     = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+ProxyVidCap.CLSID     = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+ProxyXBar.CLSID       = "{71F96460-78F3-11d0-A18C-00A0C9118956}"
+ProxyAnlgCap.CLSID    = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+ProxyTvAudio.CLSID    = "{71F96462-78F3-11d0-A18C-00A0C9118956}"
+ProxyEncoder.CLSID    = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+ProxyAnlgEncoder.CLSID= "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+
+ActiveMovieCategories = "CLSID\{da4e3da0-d07d-11d0-bd50-00a0c911ce86}\Instance"
+GUID.DataCompressor   = "{1E84C900-7E70-11D0-A5D6-28DB04C10000}"
+GUID.Encoder          = "{19689BF6-C384-48fd-AD51-90E58C79F70B}"
+GUID.Multiplexer      = "{7A5DE1D3-01A1-452c-B481-4FA2B96271E8}"
+
+
+
+MediaCategories            = "SYSTEM\CurrentControlSet\Control\MediaCategories"
+MediaInterfaces            = "System\CurrentControlSet\Control\MediaInterfaces"
+GUID.AVer_VIDEO_OUT        = "{6DA2460E-3021-425f-9DC5-7311A8AEB761}"
+GUID.AVer_INDEX_OUT        = "{3C994D6B-ABA9-48e1-8BA5-65FDB96216C0}"
+GUID.AVer_YUV_OUT          = "{8F8C0C58-E86E-4a01-AE8C-EAE38471CF66}"
+GUID.AVer_AUDIO_OUT        = "{A4F3D4A8-3DB7-419a-960E-3FAABE6C89AD}"
+GUID.AVer_PCM_OUT          = "{D29BE036-E7E2-4bee-B7FF-6D02B32FCC69}"
+GUID.AVer_VIDEO_IN         = "{8B721E50-BE65-4efc-AD8C-57A9F7D2EEE5}"
+GUID.AVer_YUV_IN           = "{F01AB56E-D77B-43cd-8D6C-6817E06A651F}"
+GUID.AVer_AUDIO_ANALOG_IN  = "{0467FF42-DD47-44c2-A09D-2249612F4E0A}"
+GUID.AVer_VIRTUAL_PIN      = "{494B594A-026C-48a3-9A8A-ECC35CFE3320}"
+GUID.AVer_VIRTUAL_VIDEO_OUT= "{9CAC6413-0F1B-49c2-ADB5-E68882813508}" 
+GUID.AVer_VIRTUAL_VIDEO_IN = "{3E02270E-CFB0-4789-ABC2-7D5822AE9B37}"
+GUID.AVer_PCM_IN           = "{DB80F8A7-7E56-428d-87FD-B67069E586C3}"
+
+
+
+KSCATEGORY_DATADECOMPRESSOR = "{2721AE20-7E70-11D0-A5D6-28DB04C10000}"
+KSCATEGORY_CAPTURE          = "{65e8773d-8f56-11d0-a3b9-00a0c9223196}"
+KSCATEGORY_CROSSBAR         = "{a799a801-a46d-11d0-a18c-00a02401dcd4}"
+KSCATEGORY_TVAUDIO          = "{a799a802-a46d-11d0-a18c-00a02401dcd4}"
+KSCATEGORY_ENCODER          = "{19689BF6-C384-48fd-AD51-90E58C79F70B}"
+KSCATEGORY_DATACOMPRESSOR   = "{1E84C900-7E70-11D0-A5D6-28DB04C10000}" 
+KSCATEGORY_MULTIPLEXER      ="{7A5DE1D3-01A1-452c-B481-4FA2B96271E8}"
+
+
+; PROPSETIDs in the driver
+;
+GUID.QLDEV_CONTROL_PROPERTIES = "{FAE408DC-E1D4-472b-AC63-9A99A155410D}"
+
+
+; Property page GUIDS
+;
+GUID.System_Properties		= "{65D7CBAE-2C2D-4009-977F-E7C68B136E1F}"
+GUID.Video_Properties2		= "{D26F4538-36C2-4463-BC5E-23C73E37D8A8}"
+GUID.Audio_Properties	   	= "{6F048C6E-461E-429c-BE97-CF7B2A3C41D4}"
+GUID.Coding_Properties		= "{F00A2CB4-1D17-4c51-8BEE-7110945DF3D6}"
+GUID.Diag_Properties		= "{1B2067E7-E6CD-4678-9ECB-C923E060AA82}"
+GUID.Decode_Properties2		= "{64AFE799-B4BC-48b1-A691-32F127E74E1E}"
+GUID.Config_Properties		= "{BE57F4B5-0379-4604-8835-F2C7D8ADBD01}"
+GUID.Wizard_Properties		= "{45E0EEED-AEDD-41a1-8DF0-691E5B537E13}"
+
+;----------------
+; Localizable
+;----------------
+
+;; need to change the following string depend on the target name
+TargetName = "AVer330USB"
+
+Category_DataCompressor = "WDM Streaming Data Compressor Devices"
+Category_Encoders       = "WDM Streaming Encoder Devices"
+Category_Multiplexers   = "WDM Streaming Multiplexer Devices"
+Node.Compressor         = "Compressor"
+Node.Encoder            = "Encoder"
+Node.Multiplexer        = "Multiplexer"
+
+
+Pin.AVer_VIDEO_OUT         = "H264 Out"
+Pin.AVer_INDEX_OUT         = "Index"
+Pin.AVer_YUV_OUT           = "YUV Out"
+Pin.AVer_AUDIO_OUT         = "AAC Out"
+Pin.AVer_PCM_OUT           = "PCM Out"
+Pin.AVer_VIDEO_IN          = "H264 In"
+Pin.AVer_YUV_IN            = "YUV In"
+Pin.AVer_AUDIO_ANALOG_IN   = "Analog Audio In"
+Pin.AVer_VIRTUAL_PIN       = "Internal"
+Pin.AVer_VIRTUAL_VIDEO_OUT = "Virtual Video Out"
+Pin.AVer_VIRTUAL_VIDEO_IN  = "Virtual Video In"
+Pin.AVer_PCM_IN            = "PCM In"
+
+; Reference GUIDS
+;
+KsNameFilter                 = "{9B365890-165F-11D0-A195-0020AFD156E4}"
+DecoderReferenceGuid         = "{C67C30EF-FC9F-4269-8A17-FB32754C08BD}"
+TVAudioReferenceGuid         = "{BD5227E3-96BB-4172-9CD3-D07B25FAC01A}"
+XBARReferenceGUID            = "{7FF4A505-4EF4-4b45-94D0-0A06ED4BEC65}"
+TunerReferenceGuid           = "{EBE24D78-F037-4932-B879-CCEFEFE78750}"
+EncoderReferenceGuid         = "{03688831-8667-4c61-B5D6-4A361F025D2D}"
+DataCompressorReferenceGuid  = "{30224022-6967-4383-B3B8-399C1F6A2A62}"
+CaptureReferenceGuid         = "{957BD672-7934-4b55-B81A-3E22B14C679A}"
+AnalogEncoderReferenceGuid   = "{DBDC4926-3C4C-46a9-95ED-1F1DDE04B5A5}"
+
+
+AVer.InstallationDir         = "AVerMedia HD Capture Dir"
+AVer.Provider                = "AVerMedia TECHNOLOGIES, Inc."
+AVer.Manufacturer            = "AVerMedia TECHNOLOGIES, Inc."
+AVer.DeviceDesc	             = "AVerMedia GL310 USB HD Capture Device"
+
+AVer.Crossbar                = "AVerMedia C835 Crossbar"
+AVer.TvAudio                 = "AVerMedia H264 TvAudio"
+AVer.Decoder                 = "AVerMedia H264 Decoder"
+AVer.Encoder                 = "AVerMedia H264 Encoder"
+AVer.AnlgEncoder             = "AVerMedia C835 H264 Encoder"
+AVer.Capture                 = "AVerMedia C835 Capture"
+AVer.DataCompressor          = "AVerMedia C835 Compressor"
+
+MediaSets                    = "System\CurrentControlSet\Control\MediaSets"
+
