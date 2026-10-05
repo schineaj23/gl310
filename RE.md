@@ -464,6 +464,96 @@ rough order of likelihood:
    boot-vector or remap register we have not found.
 4. The pipe resets the driver does at `dispatchPnpStart` (pipes 1,3,0,2).
 
+### Boot attempt 3: the core will not execute an 8-instruction loop
+
+The decisive test, `tools/gl310armtest.c`. Instead of debugging QPSOS, load a
+trivial ARM stub and watch for it running:
+
+```
+0x00: E59F0018   ldr r0, [pc, #0x18]   ; r0 = counter address (literal at 0x20)
+0x04: E3A01000   mov r1, #0
+0x08: E5801000   str r1, [r0]
+0x0c: E5901000   ldr r1, [r0]          ; LOOP
+0x10: E2811001   add r1, r1, #1
+0x14: E5801000   str r1, [r0]
+0x18: EAFFFFFB   b   LOOP
+```
+
+An ARM core resets into ARM state with MMU and caches off, fetching from
+`0x00000000`, so this needs no setup. Two copies were loaded with separate
+counters — **stub A at our `0x0`, stub B at our `0x4000`** — specifically to test
+whether the `start = base + 0x4000` window mapping offsets what the core fetches.
+
+Stub A's first word was read back as `0xe59f0018`, confirming it is in memory.
+Result over 2 s of polling: **neither counter moved.**
+
+This is a strong negative that eliminates several hypotheses at once:
+
+- not firmware corruption or staleness — this is 8 instructions we wrote and verified;
+- not firmware complexity or an early crash — the loop cannot fault;
+- not mutated DRAM data sections;
+- **not the `+0x4000` offset** — stub B did not run either.
+
+The core is released and simply executes nothing.
+
+### `ResetArm` verified, and a proper reset-state instrument found
+
+Because `0x61c` self-varies and `reg 0x04` had looked unreliable, there was briefly
+no evidence `ResetArm` did anything at all (it returns no reply). Settled by
+differential scan of registers `0x000`–`0xffc`: read twice to identify the 7
+self-varying registers (`0x0014 0x001c 0x0084 0x0088 0x0c18 0x0c38 0x0c54`), then
+toggle reset and diff only the stable ones.
+
+**65 registers respond, cleanly and reversibly:**
+
+| | `0x0400` | `0x0404`–`0x04fc` (64 regs) | `0x0004` |
+|---|---|---|---|
+| held (`run=0`) | `0x43` | `0x00000003` | `0x000a4040` |
+| released (`run=1`) | `0x40` | `0x000000dc` | `0x000b6c7d` |
+
+So `ResetArm` works exactly as documented, and **`0x400`–`0x4fc` is the ARM
+reset-state block** — bits 0–1 of `0x400` set while halted. The driver never writes
+this range (checked across every function), so it is read-only status maintained by
+the USB front-end. It is the reliable instrument for "is the core held or released";
+prefer it over `reg 0x04`, which tracks the same thing but was observed latched at
+the held value for a while after the image was clobbered.
+
+Note that once released, the 64 status registers sit **static at `0xdc`** — the core
+is out of reset but idle, not spinning through a fault handler.
+
+### `QPHCI_PowerUp` — checked, not the blocker
+
+`QPHCI_PowerUp` (`0x498f0`) reads register `0x50`, clears bit `0x100` and writes it
+back, so "pad control" is also register `0x50`. The live card reads `0x50 = 0x404`,
+i.e. bit 8 already clear: the pads are already powered up. Completing that register:
+
+```
+bit 1 (0x002)  audio out      (AOSwitch)
+bit 2 (0x004)  video out      (VOSwitch)
+bit 8 (0x100)  pad power-down (QPHCI_PowerUp clears, PowerDown sets)
+bit 10 (0x400) unknown, currently set
+```
+
+### Where this points
+
+The core is demonstrably released but executes nothing, even from a verified
+8-instruction loop at address 0. So the blocker is not the image and not the reset
+line — it is that **the core cannot fetch from DRAM.**
+
+That focuses everything on the one step deliberately skipped: **DDR training**
+(`CQLCodec_InitializeMemory`). DMA reaches DRAM correctly, but the DMA engine and
+the core's instruction-fetch path are different masters on the memory controller. A
+controller that is *configured* but never *trained* can plausibly serve the DMA port
+while failing core fetches.
+
+Next, in order:
+
+1. Implement step 3 fully — the `0xf14` command sequence and the rest of the `0xf00`
+   block, with `type=1`/`size=512Mb` constant-folded. Then re-run the stub test:
+   `0x400`'s block plus the counter give an unambiguous oracle.
+2. If that fails, find `QPCODEC_DIAG_HW_RESET`'s implementation (a second reset,
+   distinct from `RESET_ARM`) and any ARM clock or PLL gate.
+
 ### What remains for a cold boot
 
 Only three gaps, all small and all in hand:
