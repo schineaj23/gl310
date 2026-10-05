@@ -1,0 +1,32 @@
+GL310 capture session - signal notes
+====================================
+Date:
+Machine: lynxbook (Windows, x64)
+USBPcap interface used:       \\.\USBPcap1
+GL310 bus / device address (from Wireshark usb.bus_id / usb.device_address):
+
+Source feeding the GL310 HDMI input
+-----------------------------------
+Device (camera model):
+Output resolution:            1920x1080 interlaced (driver: 1920 x 540 fields)
+Frame rate:                   60 (driver-reported)
+Scan:                         interlaced
+HDMI audio present?:          yes, 48 kHz (driver-reported)
+Passthrough monitor showed picture?: yes / no
+
+Capture A - gl310-bringup.pcapng
+--------------------------------
+Started capture before plug-in?: yes / no
+OBS preview showed picture?:  yes / no / black
+18f09fe5 search hit?:         yes / no
+DebugView "HDMI information" line (copy it here):
+
+Capture B - gl310-streamonly.pcapng
+-----------------------------------
+Preview cycles:               2 x ~5 s
+Anything odd:
+
+Capture C (optional) - one setting changed
+------------------------------------------
+File name:
+What changed (from -> to):
