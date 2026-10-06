@@ -366,20 +366,43 @@ int main(int argc, char **argv) {
                                ms, msg & 0xff, addr, done, p[2]);
                 }
             }
-            /* Return the buffer: CTask_CompleteArm sends code 0x30 echoing the
-               incoming parameters.
+            /* Return the buffer. CTask_CompleteArm (0x725d0) dispatches on the
+               incoming command: 0x40 and 0x41 both reply with message code 0x30.
 
-               These are deliberately six single writes, not one RegisterWriteEx.
-               Op 0x03 does not behave the way CUsbCntl_RegisterWriteEx's own encoder
-               implies: writing five values from 0x6d0 put value[1] at 0x6d0,
-               value[2] at 0x6d4 and value[3] at 0x6d8, with value[0] and value[4]
-               landing nowhere visible. Until that is understood, only the read side
-               gets batched - RegisterReadEx is verified 1:1 against the known
-               mailbox layout, op 0x03 is not. */
-            unsigned int ap[6] = { p[0], p[1], p[2], p[3], p[4], 1 };
+               Its parameters are NOT an echo of the incoming message. They come from
+               the per-request array at task + reqid*0x48, and the captured session
+               shows what they actually hold:
+
+                 CTask_CompleteArm() type(0x83) addr(0x668f00) size(160740)
+                     offset(160740) PTS(715827882) valid(0) last(0) frameFlags(0x0)
+
+               for an incoming message with p1=0x83, p2=0x668f00, p4=0x9cf9 words
+               (=160740 bytes), p5=0xaaaaaaaa. So the ack writes:
+
+                 0x6f8 = type         = incoming p1
+                 0x6f4 = offset >> 2  = how much we CONSUMED, in words
+                 0x6f0 = PTS          = incoming p5 >> 2 (715827882 = 0xaaaaaaaa >> 2)
+                 0x6ec = valid        = 0
+                 0x6e8   not written at all on this path
+                 0x6e4 = field 0x1e4  = 0
+
+               offset always equals size in the log: the host reports it took the whole
+               fragment. Putting the *address* in 0x6f4, as a blind echo does, tells the
+               ARM nothing about progress - which is why its read pointer never advanced
+               and it kept re-posting ring state until it gave up.
+
+               Single writes, not RegisterWriteEx: op 0x03 misplaces values on this
+               device (see RE.md), so only the read side is batched. */
+            struct { unsigned int reg, val; } ack[] = {
+                { 0x6f8, p[0]      },   /* type                      */
+                { 0x6f4, p[3]      },   /* consumed length, in words */
+                { 0x6f0, p[4] >> 2 },   /* PTS                       */
+                { 0x6ec, 0         },   /* valid                     */
+                { 0x6e4, 0         },   /* 0x1e4, unnamed            */
+            };
             int bad = 0;
-            for (int i = 0; i < 6 && !bad; i++)
-                bad = reg_write(PARAM_REG[i], ap[i]);
+            for (int i = 0; i < (int)(sizeof ack / sizeof ack[0]) && !bad; i++)
+                bad = reg_write(ack[i].reg, ack[i].val);
             if (bad) break;
             if (reg_write(R_TO_ARM_STATUS, 1u)) break;
             if (reg_write(R_TO_ARM_MSG, 0x30u)) break;

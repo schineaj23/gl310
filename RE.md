@@ -1080,6 +1080,85 @@ Beyond that, the asynchronous path is the architecture the vendor driver uses:
 in `CEncoderTask_ProcessIoComplete`. `libusb_submit_transfer` with several reads
 outstanding is the equivalent.
 
+### Flow control, solved: the ack carries a consumed count
+
+`CTask_CompleteArm` (`0x725d0`) dispatches on the incoming command — `0x40` and `0x41`
+both reply with code `0x30` — and its parameters come from a **per-request array at
+`task + reqid*0x48`**, not from the incoming message. The captured session prints the
+fields with real values:
+
+```
+CTask_CompleteArm() type(0x83) addr(0x668f00) size(160740) offset(160740)
+                    PTS(715827882) valid(0) last(0) frameFlags(0x0)
+```
+
+for an incoming message of `p1=0x83 p2=0x668f00 p4=0x9cf9` words (=160740 bytes) and
+`p5=0xaaaaaaaa`. Mapping the fields to the registers the function writes:
+
+| register | field | value |
+|----------|-------|-------|
+| `0x6f8` | `+0x1d4` type | incoming `p1` |
+| `0x6f4` | `+0x1c4` offset `>> 2` | **how much we consumed, in words** |
+| `0x6f0` | `+0x1c0` PTS | incoming `p5 >> 2` (`715827882 = 0xaaaaaaaa >> 2`) |
+| `0x6ec` | `+0x1d0` valid | `0` |
+| `0x6e8` | — | *not written on this path* |
+| `0x6e4` | `+0x1e4` | `0` |
+
+`offset` always equals `size` in the log: the host reports it took the whole fragment.
+**Putting the address in `0x6f4`, as a blind echo does, tells the ARM nothing about
+progress** — which is exactly why its read pointer never advanced and it kept
+re-posting ring state until it gave up.
+
+With the consumed count sent properly, the transport layer is **perfect**:
+
+```
+863 fragments in 3 s, mean 6731 B    (was 455 fragments of mean 59 KB)
+802 of 862 chain exactly: p2_next == p2 + p4
+60 wraps to ring base, and p3 == 1 exactly 60 times
+PID 0x0044: 30853/30853 continuity steps correct (100.00%), 0 dups, 0 losses
+PID 0x0045: 42/42 correct
+```
+
+So `p3` marks **the fragment that ends at the ring end**, not end-of-frame, and
+reassembly really is "concatenate every fragment in order, un-swapping 32-bit words".
+That now holds with zero packet loss rather than 99.21%.
+
+Also settled: the throttle. `--idle-us` must be nonzero — polling flat out at
+5381 polls/s produced *nothing at all*, because the firmware's HCI thread never got
+scheduled. 1 ms (≈366 effective polls/s) works.
+
+### But there is no video in the stream yet
+
+**The transport stream is flawless and its payload is not compressed video.** Measured
+on the elementary stream of PID `0x44`:
+
+```
+00 00 00  :  448928     <- forbidden inside a valid H.264 NAL
+00 00 01  :   20737     <- should only appear at NAL boundaries
+00 00 03  :    4336     <- the emulation-prevention escape
+byte entropy: 5.396 bits/byte   (compressed video is ~7.9-8.0)
+0x00 is 27% of all bytes, 0xff is 14%
+```
+
+`ffmpeg` decodes **0 frames** and reports `data partitioning is not implemented`, which
+is it mis-parsing noise as NAL types 2/3/4. Only 7 of 30854 packets carry
+`payload_unit_start`, where one PES per frame would give ~90.
+
+**This retracts two earlier claims.** First, that the ADV7441 needs no host I²C setup —
+that was inferred from a structurally valid TS, which does not imply pictures. Second,
+the original "ffmpeg identifies it as h264 + aac" result: those codec names come from
+the **PMT descriptor**, i.e. from what the muxer *declares*, not from decoded video.
+The muxer has been running correctly all along with nothing real to carry.
+
+So the remaining work is to give the encoder a picture: `CADI7441_InitDevice` plus
+`CADI7441_SelectVideoSource source(20)` over HW I²C (op `0x08`).
+
+One obstacle there: op `0x08` currently returns `00 00` for *every* slave address
+tried (`0x20 0x21 0x40 0x42 0x2a 0x54 0x5c`), so the reply gives no way to tell an ACK
+from a NAK and the bus cannot be scanned. The I²C reply format needs decoding from
+`CUsbCntl_I2CWriteThenRead` (`0x84f50`) first. GPIO `0x618` reads `0x0000ff1f`, so
+bit 12 is set, matching `QPCODEC_GPIO_BIT_VALUE bit(12) val(1)` in the working session.
+
 ### What the faster loop revealed
 
 Batching the read side and throttling the idle poll changed the picture, and not
@@ -1167,14 +1246,14 @@ state. That reset is now last and behind `--hard` in `gl310recover`.
 The protocol is finished. What remains is engineering, and one piece of it is now
 clearly on the critical path.
 
-- **Asynchronous capture.** This is the blocker for a usable stream: keep several
-  `libusb_submit_transfer` reads outstanding instead of one synchronous read per
-  notification, so the firmware's gadget message pool never empties. Expect the 0.79%
-  packet loss and the wedges to go away together.
-- **ADV7441 setup is not needed.** The encoder produced valid data on a *cold* card,
-  so the receiver passes a signal through without host I²C configuration.
-  `CADI7441_InitDevice` and `CADI7441_SelectVideoSource source(20)` are presumably
-  about input selection and format forcing, not basic operation.
+- **Transport is done.** The consumed-count ack gives 100% TS continuity with zero
+  loss, so asynchronous I/O is no longer on the critical path - it is a latency and
+  CPU optimisation for later.
+- **ADV7441 setup IS needed** — this reverses an earlier note. The TS carries no
+  picture data, so the receiver must be configured over HW I²C after all:
+  `CADI7441_InitDevice` and `CADI7441_SelectVideoSource source(20)`. Decode the I²C
+  reply format from `CUsbCntl_I2CWriteThenRead` (`0x84f50`) first, because op `0x08`
+  currently answers `00 00` for every slave address and cannot distinguish ACK from NAK.
 - **Task lifecycle.** A second `StartEncoder` after a `StopEncoder` produces no frames;
   the inbound mailbox then shows `cmd 0x50` (encoder stopped). Either send
   `SystemClose` (`0xf3`) first or just reboot the firmware between runs, which takes
