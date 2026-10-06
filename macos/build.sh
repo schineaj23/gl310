@@ -35,6 +35,7 @@ EOF
 $SWIFTC -o "$EXT/Contents/MacOS/$EXT_ID" Shared/IDs.swift "$OUT/BuildIDs.swift" Extension/*.swift
 $SWIFTC -o "$APP/Contents/MacOS/GL310Camera" Shared/IDs.swift "$OUT/BuildIDs.swift" App/main.swift
 $SWIFTC -o "$OUT/gl310feed" Shared/IDs.swift "$OUT/BuildIDs.swift" Feeder/main.swift
+${SWIFTC%13.0}14.0 -o "$OUT/gl310probe-cam" Shared/IDs.swift "$OUT/BuildIDs.swift" Probe/main.swift
 
 echo "== bundles"
 cat > "$APP/Contents/Info.plist" <<EOF
@@ -96,6 +97,7 @@ codesign --force --options runtime --timestamp=none --entitlements "$OUT/ext.ent
 codesign --force --options runtime --timestamp=none --entitlements "$OUT/app.entitlements" \
          -s "$SIGN_ID" "$APP"
 codesign --force -s "$SIGN_ID" "$OUT/gl310feed"
+codesign --force -s "$SIGN_ID" "$OUT/gl310probe-cam"
 codesign --verify --strict --deep "$APP" && echo "signature structure OK"
 
 echo

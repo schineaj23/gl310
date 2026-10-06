@@ -177,19 +177,33 @@ guard let pool = makePool() else { err("gl310feed: cannot create pixel buffer po
 let sink = dryRun ? nil : openSink()
 if !dryRun && sink == nil { exit(1) }
 err(dryRun ? "gl310feed: dry run, reading frames only"
-           : "gl310feed: feeding \"\(GL310.deviceName)\"")
+           : "gl310feed: feeding \"\(GL310.deviceName)\", sink queue capacity "
+             + "\(CMSimpleQueueGetCapacity(sink!.queue))")
 
 let frame = UnsafeMutableRawPointer.allocate(byteCount: frameBytes, alignment: 64)
 var frames = 0, dropped = 0
 let t0 = Date()
+var depthSum = 0, depthMax = 0, depthN = 0, statDropped = 0
+var lastStat = Date()
 while !stopRequested && readFrame(frame) {
     frames += 1
     guard let sink else { continue }
-    // The sink queue is small; if the extension is not draining it (no client is
-    // watching the camera), drop rather than block the decoder upstream.
-    if CMSimpleQueueGetCount(sink.queue) >= CMSimpleQueueGetCapacity(sink.queue) {
+    let depth = Int(CMSimpleQueueGetCount(sink.queue))
+    depthSum += depth; depthN += 1; depthMax = max(depthMax, depth)
+    if Date().timeIntervalSince(lastStat) >= 10 {
+        err(String(format: "gl310feed: %4.0f s  sink queue avg %.1f max %d of %d, %d dropped",
+                   Date().timeIntervalSince(t0), Double(depthSum) / Double(max(depthN, 1)),
+                   depthMax, CMSimpleQueueGetCapacity(sink.queue), dropped - statDropped))
+        depthSum = 0; depthN = 0; depthMax = 0; statDropped = dropped; lastStat = Date()
+    }
+    // Never block the decoder upstream, and never let stale frames pile up: if the
+    // extension has not drained the queue, throw away the OLDEST frame so what is
+    // queued is always the most recent picture. (Dropping the new frame instead
+    // kept the queue full of old ones - latency grew to the whole queue length.)
+    while CMSimpleQueueGetCount(sink.queue) >= CMSimpleQueueGetCapacity(sink.queue) {
+        guard let old = CMSimpleQueueDequeue(sink.queue) else { break }
+        Unmanaged<CMSampleBuffer>.fromOpaque(old).release()
         dropped += 1
-        continue
     }
     var pb: CVPixelBuffer?
     CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pb)

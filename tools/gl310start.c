@@ -247,6 +247,7 @@ int main(int argc, char **argv) {
                             The session's 60000 overflows the 128 KiB bitstream
                             buffer (RE.md), so the default is 8000. */
     unsigned int cfg_reg[8], cfg_val[8]; int ncfg = 0;  /* --cfg REG VAL */
+    int stall_ms = 0, stall_at_s = 0;  /* --stall MS AT_S: test catch-up after a hiccup */
     int keep_dups = 0;   /* --keep-dups: output repeated notifications too */
     int ts_out = 0;      /* un-swap the 32-bit words into a plain MPEG-TS */
     int read_delay_us = 0; /* wait after a cmd 0x40 before DMA-reading it */
@@ -285,6 +286,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outpath = argv[++i];
         else if (!strcmp(argv[i], "--ts")) ts_out = 1;
         else if (!strcmp(argv[i], "--keep-dups")) keep_dups = 1;
+        else if (!strcmp(argv[i], "--stall") && i + 2 < argc) {
+            stall_ms = atoi(argv[++i]); stall_at_s = atoi(argv[++i]);
+        }
         else if (!strcmp(argv[i], "--cfg") && i + 2 < argc && ncfg < 8) {
             cfg_reg[ncfg] = (unsigned)strtoul(argv[++i], 0, 0);
             cfg_val[ncfg++] = (unsigned)strtoul(argv[++i], 0, 0);
@@ -481,6 +485,11 @@ int main(int argc, char **argv) {
         gettimeofday(&now, NULL);
         long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_usec - t0.tv_usec) / 1000;
         if (stop_req) break;
+        if (stall_ms && ms >= (long)stall_at_s * 1000) {
+            fprintf(stderr, "  [%ld ms] test stall: not reading for %d ms\n", ms, stall_ms);
+            usleep((unsigned)stall_ms * 1000u);
+            stall_ms = 0;
+        }
         if (watch_s > 0 && (ms >= (long)watch_s * 1000 || frames >= max_frames)) break;
 
         /* 0x6b0..0x6cc: msg, p1..p5, inbound status, outbound doorbell - one transfer */
