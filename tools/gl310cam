@@ -1,0 +1,18 @@
+#!/bin/sh
+# gl310cam - drive the "GL310 HDMI" macOS camera from the card.
+#
+#   card --USB--> gl310live (H.264 in MPEG-TS) --> ffmpeg (VideoToolbox decode
+#   to NV12) --> gl310feed --> camera extension sink --> any camera app
+#
+# Needs the extension activated (macos/README.md) and ffmpeg. Ctrl-C stops it all;
+# gl310start then stops the encoder and reboots the card's firmware cleanly.
+# No -fflags nobuffer / -flags low_delay: with them VideoToolbox rejects the first
+# ~0.7 s of a live stream ("Error submitting packet"); without them it is clean.
+# Extra arguments go to gl310feed (e.g. --dry-run to test without the camera).
+here=$(cd "$(dirname "$0")" && pwd)
+feed="$here/../macos/build/gl310feed"
+[ -x "$feed" ] || { echo "build it first: macos/build.sh" >&2; exit 1; }
+"$here/gl310live" \
+  | ffmpeg -hide_banner -loglevel error -hwaccel videotoolbox -f mpegts -i - \
+           -f rawvideo -pix_fmt nv12 - \
+  | "$feed" "$@"
