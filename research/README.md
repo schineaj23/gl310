@@ -38,6 +38,3 @@ The exploratory programs. Build the C ones with `make research` from the repo ro
 | `sysmap.py` | navigates `AVer330USB.sys` by its debug strings |
 | `gl310cap.py` | decodes USBPcap captures of the card; [test/make_synth.py](test/make_synth.py) builds a synthetic capture to self-test it |
 | `preflight.ps1` | read-only readiness check before a Windows capture |
-
-Ghidra projects (`ghidra/`, `gl310.gpr`, `gl310.rep/`) are kept locally and are not in
-git.

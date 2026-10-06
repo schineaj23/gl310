@@ -16,10 +16,7 @@ __pycache__/
 *.swp
 .DS_Store
 
-# Ghidra working projects: large binary DBs plus lock/temp files
-ghidra/
-gl310.gpr
-gl310.rep/
+research/ghidra/
 *.lock
 *.lock~
 
