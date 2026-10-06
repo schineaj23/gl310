@@ -145,6 +145,35 @@ static void switch_mode(unsigned int flag) {
     usleep(400000);
 }
 
+/* InterfaceNUC100::accessRegs_viaNUC (0x20b40): reach a chip on the MCU's OWN I2C bus.
+   The host bus only has the MCU on it (a scan finds 0x00 and 0x15 and nothing else),
+   so the video receiver's register maps are behind this bridge.
+
+     write:  0e <slave> 1 <reg> 01        5 bytes, then 5 ms
+             13 <val>                     2 bytes, then 5 ms
+             12 01                        2 bytes
+     read:   0e <slave> 0 <reg> 01 01     6 bytes, then 15 ms
+             read MCU sub 0x13, 1 byte -> the value
+*/
+#define MCU 0x15
+static int nuc_write(unsigned int slave, unsigned int reg, unsigned int val) {
+    unsigned char a[5] = {0x0e, (unsigned char)slave, 1, (unsigned char)reg, 1};
+    unsigned char b[2] = {0x13, (unsigned char)val};
+    unsigned char c[2] = {0x12, 1};
+    int st = i2c_write(MCU, a, 5); if (st != I2C_OK) return st;
+    usleep(5000);
+    st = i2c_write(MCU, b, 2);    if (st != I2C_OK) return st;
+    usleep(5000);
+    return i2c_write(MCU, c, 2);
+}
+static int nuc_read(unsigned int slave, unsigned int reg, unsigned char *out) {
+    unsigned char a[6] = {0x0e, (unsigned char)slave, 0, (unsigned char)reg, 1, 1};
+    unsigned char w = 0x13;
+    int st = i2c_write(MCU, a, 6); if (st != I2C_OK) return st;
+    usleep(15000);
+    return i2c_wr_rd(MCU, &w, 1, out, 1);
+}
+
 /* InterfaceNUC100::getHdmiVideo_6604 (0x211d0) reads MCU register 0x1d, 7 bytes, and
    unpacks four 12-bit fields from them - nibble-packed, two values per three bytes:
 
@@ -183,11 +212,17 @@ static const unsigned char BLOCK_B[][2] = { {0x14,0x1f}, {0x15,0xec}, {0x1c,0x49
 
 int main(int argc, char **argv) {
     int scan = 0, go = 0, init = 0, hold = 1, shift = 1, swmode = 0, hdmi = 0;
+    int nucscan = 0, nr_slave = -1, nr_reg = 0;
     unsigned int rd_slave = 0; int rd_sub = -1, rd_n = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--scan")) scan = 1;
         else if (!strcmp(argv[i], "--sw")) sw = 1;
         else if (!strcmp(argv[i], "--hdmi")) hdmi = 1;
+        else if (!strcmp(argv[i], "--nuc-scan")) nucscan = 1;
+        else if (!strcmp(argv[i], "--nuc-read") && i + 2 < argc) {
+            nr_slave = (int)strtoul(argv[++i], 0, 0);
+            nr_reg   = (int)strtoul(argv[++i], 0, 0);
+        }
         else if (!strcmp(argv[i], "--switch")) swmode = 1;
         else if (!strcmp(argv[i], "--unswitch")) swmode = 2;
         else if (!strcmp(argv[i], "--go")) go = 1;
@@ -244,6 +279,25 @@ int main(int argc, char **argv) {
             }
         }
         if (!found) printf("  nothing answered on any of 256 addresses.\n");
+    }
+
+    if (nucscan) {
+        sw = 1;
+        printf("Scanning the MCU's own I2C bus via accessRegs_viaNUC (reg 0x00 of each)\n");
+        for (unsigned int a = 0; a < 0x80; a++) {
+            unsigned char v = 0xff;
+            int st = nuc_read(a, 0x00, &v);
+            if (st == I2C_OK && v != 0xff)
+                printf("  slave 0x%02x -> reg0x00 = 0x%02x\n", a, v);
+        }
+        printf("  (0xff means no response from that slave on the MCU bus)\n");
+    }
+    if (nr_slave >= 0) {
+        unsigned char v = 0xff;
+        sw = 1;
+        int st = nuc_read(nr_slave, nr_reg, &v);
+        printf("NUC bridge read: slave 0x%02x reg 0x%02x -> 0x%02x (status 0x%02x)\n",
+               nr_slave, nr_reg, v, st);
     }
 
     if (hdmi) { sw = 1; printf("HDMI input status, via the NUC100 MCU at 0x15:\n"); read_hdmi_status(); }

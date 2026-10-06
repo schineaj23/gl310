@@ -1377,6 +1377,47 @@ structurally perfect transport stream with no picture in it, the camera was not 
 problem — the receiver was seeing the signal all along. Whatever is missing is between
 the receiver and the encoder's video input unit.
 
+Note what that implies: **the MCU appears to configure the receiver autonomously.** We
+have never written a single receiver register, yet it reports a locked 1080i signal.
+
+### The bridge works, but cannot be used to probe
+
+`gl310i2c --nuc-read SLAVE REG` implements `accessRegs_viaNUC` and returns status
+`0x08`. But a sweep of all 128 slave addresses returns `0x00` for every one of them, so
+the MCU reports zero rather than an error when nothing answers, and **presence cannot
+be probed this way**. `--nuc-scan` is kept but its output means nothing on its own.
+
+### `CADI7441_SelectVideoSource`, extracted but probably moot
+
+`CADI7441_WriteBlock` (`0x9b940`) walks an array of `u32` pairs — register, value —
+terminated by `-1`, writing each with `writeRegister` (`0x9aa30`), which sends
+`{reg, val}` to the slave in `this[0x3b0]` through the object at `this[0x3a8]`, calling
+its slot `+8`. That object is *not* a `CI2C` instance (those install at `+0x38`/`+0x40`/
+`+0x48`), and has not been identified.
+
+`CADI7441_SelectVideoSource(source)` picks one of four tables — sources 1, 10, **20**
+and 40. Source 20 is what the log shows, and its table is:
+
+```
+00=00 03=09 04=47 05=06 06=02 17=01 1d=40 31=12 34=00 35=02 37=00
+3a=01 3c=58 47=00 68=f0 69=00 6b=e3 7b=0d ba=a0 c8=08 f3=00 f4=3f
+```
+
+`CADI7441_SetVideoRes` similarly writes tables for 640x480, 720x480, 720x576, 1280x720
+and 1920x1080 at 25 or 50 fps.
+
+All of this is I²C to slaves `0x31`/`0x35`, which **do not answer on the host bus** —
+only the MCU does. Combined with the receiver already being locked without our help,
+the likeliest reading is that the `CADI7441` path belongs to a sibling board and fails
+silently here. It is recorded in case that turns out to be wrong.
+
+### The step we still skip
+
+`CQLCodecLib_InitDevice` (`0x3ffd0`) is the outer bring-up: it calls `QPHCI_ReInit`,
+`CQLCodec_InitializeMemory`, `CQLCodec_AOSwitch`, `CQLCodec_SetGPIODefaults`,
+`CQLCodec_FWDownloadAll` **and `CQLCodecLib_InitPeripherals`**. `gl310init` replicates
+only the `FWDownloadAll` half. The peripherals half is where the receiver setup lives.
+
 ### `CQLCodec_FWSwitchMode`, and why not to run it
 
 The driver can move the ARM between loader and main firmware — the gadget's
