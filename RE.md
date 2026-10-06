@@ -86,11 +86,16 @@ shift the byte address right by 2 themselves. For DMA the caller passes word uni
 the log confirms: the audio image at byte 0x100000 goes to `Arm(0x40000)`, and 32 KiB
 chunks step `Arm` by 0x2000.
 
-Cross-checks against the log: `UsbSendCmd()` prints `data(<first byte>) len(<bytes>)`.
-- The 125 ms GPIO poll shows `data(1) len(8)`, which is RegisterRead: op 0x01, 8 bytes.
-- The HDMI status poll shows `data(12) len(9)`, which is SWI2CWriteThenRead: op 0x0C, with
-  8 header bytes + 1 sub-address byte. `HAL::getI2C_sw` names slave 0x2a and sub 0x1b, so
-  the command is `0c 01 rr 00 2a 00 00 00 1b`, where rr is the read length (likely 1).
+> **RETRACTED — these cross-checks were never real.** This paragraph used to claim that
+> `UsbSendCmd()` log lines showed `data(1) len(8)` for the GPIO poll and `data(12) len(9)`
+> for the HDMI status poll, and concluded the latter was op `0x0C`. **The capture
+> contains zero `UsbSendCmd` lines and zero `data(N) len(N)` lines of any kind** — the
+> string exists in the driver binary but that verbosity was never enabled. I wrote those
+> bullets in an earlier session and then reasoned from them for days. Check with:
+> `grep -ci usbsendcmd captures/gl310-bringup-debugview.log` → 0.
+>
+> The conclusion happened to be right, but by luck, and it is now established properly:
+> see [§ The I²C transports, resolved](#the-i2c-transports-resolved).
 
 ## Firmware bring-up (as the driver does it)
 
@@ -1249,6 +1254,81 @@ uniform `0x00` and `0x06` statuses exactly. The vendor driver does its ADV7441 I
 t=4.93 s, **before** this image is ever downloaded, so it is talking to something else:
 the boot loader the chip comes up in.
 
+## The video input is an IT6604 behind the MCU — not the ADV7441
+
+This reframes the whole input path, and it comes from the log:
+
+```
+6.34886  InterfaceNUC100::InterfaceNUC100 entry, (slave_addr = 0x2B)
+6.34888  InterfaceNUC100::InterfaceNUC100 Info: Is ISP mode ? (0)
+6.55907  InterfaceNUC100::getHdmiVideo_6604 info : monitor match (WAct x HAct = 1920 x 540)
+```
+
+The HDMI receiver is an **IT6604**, and the host does not drive it directly — it goes
+through the **Nuvoton NUC100 MCU**, whose method is literally named
+`InterfaceNUC100::accessRegs_viaNUC`. The class has the whole input API:
+`getHdmiVideo_6604`, `getHdmiAudio_6604`, `getColorConversion_6604`, `getHdmiVideo_HDCP`,
+`setupHdmiVideo_ex`, `getEDIDMode` / `setEDIDMode` / `notifyEDIDMode`, `getVersion`,
+`checkDevice`, `setTI3101Volume`.
+
+`1920 x 540` is 1080i — the camera's signal, seen and measured by the working driver.
+
+Note the timing: `InterfaceNUC100` is constructed at **6.349 s, after** the firmware
+boots, unlike the ADV7441 work at 4.93 s. The `CADI7441_*` path is presumably for a
+sibling board; chasing it was a detour.
+
+`accessRegs_viaNUC` reaches the wire through `HAL::setI2C_sw` (`0x176b0`) and
+`HAL::getI2C_sw` (`0x175a0`), which call HAL object slots `+0x18` and `+0x20`.
+
+### The I²C transports, resolved
+
+`CI2C_Constructor` (`0xa5310`) installs three slots per type, and the session builds
+`type(1)` and `type(6)`:
+
+| slot | role | type 1 | type 6 |
+|------|------|--------|--------|
+| `+0x38` | read | `CUsbCntl_I2CRead` (op `0x08`) | `CUsbCntl_SWI2CRead` (op `0x0c`) |
+| `+0x40` | write | `CUsbCntl_I2CWrite` (op `0x05`) | `CUsbCntl_SWI2CWrite` (op `0x0b`) |
+| `+0x48` | write-then-read | `CUsbCntl_I2CWriteThenRead` (op `0x08`) | `CUsbCntl_SWI2CWriteThenRead` (op `0x0c`) |
+
+`CQLCodecLib_Get`'s `QPCODEC_DIAG_I2C_WRITE_THEN_READ` handler calls slot `+0x48`,
+which is how the driver polls the MCU at 7-bit `0x15` every ~0.75 s.
+
+## I²C works — on a freshly plugged card
+
+**This is the state that had never been tested.** On a card straight from a replug,
+with no firmware downloaded and the ARM left alone, after writing the GPIO defaults
+(`0x610 = 0`, `0x614 = 0`, as `CQLCodec_SetGPIODefaults` does just before the input
+init), a SW-I²C scan finds responders:
+
+```
+slave 0x00 -> status 0x08   ACK
+slave 0x15 -> status 0x08   ACK      <- the NUC100 MCU
+slave 0x80 -> status 0x08   ACK      (bit-7 alias of 0x00)
+slave 0x95 -> status 0x08   ACK      (bit-7 alias of 0x15)
+```
+
+Bit 7 of the slave byte is ignored, so the real responders are `0x00` and `0x15` — and
+`0x15` is exactly the MCU address the driver polls.
+
+Reading it back confirms the board beyond doubt:
+
+```
+$ gl310i2c --sw --no-hold --read 0x15 0x00 24
+00 43 36 48 05 0d 0c 10 12 01 47 33 31 30 00 ...
+   C  6  H                    G  3  1  0
+```
+
+**`G310`** at offset 0x0a, `C6H` at 0x01, and version/date bytes between. So SW-I²C
+(op `0x0c` / `0x0b`) is fully functional in loader mode, and the MCU answers.
+
+Why it failed before: every earlier attempt was made either with the main firmware
+running — whose gadget implements no I²C at all — or with the ARM halted after a
+firmware boot. Neither is the loader state the vendor driver uses.
+
+> Not yet isolated: whether writing the GPIO defaults was actually required, or whether
+> the fresh-plug loader state alone is sufficient. The two were changed together.
+
 ### `CQLCodec_FWSwitchMode`, and why not to run it
 
 The driver can move the ARM between loader and main firmware — the gadget's
@@ -1372,11 +1452,13 @@ clearly on the critical path.
 - **Transport is done.** The consumed-count ack gives 100% TS continuity with zero
   loss, so asynchronous I/O is no longer on the critical path - it is a latency and
   CPU optimisation for later.
-- **Reach the boot loader, which is where I²C lives.** The main firmware's gadget has
-  no I²C at all, so the ADV7441 init must happen before `gl310init --go` ever runs —
-  the vendor's own ordering. The untested state is a **freshly plugged card, before
-  any firmware download**: run `gl310i2c --scan` there first. If slaves answer, replay
-  the eight writes with `gl310i2c --init --go`, then download firmware and capture.
+- **Decode `InterfaceNUC100::accessRegs_viaNUC` (`0x20b40`).** SW-I²C to the MCU at
+  `0x15` now works on a freshly plugged card, so the transport is solved; what remains
+  is the MCU's own command format for reaching IT6604 registers behind it. Then
+  `setupHdmiVideo_ex` to configure the input, and `getHdmiVideo_6604` to confirm the
+  1920x540 signal the Windows driver saw.
+- **Order of operations for a capture run** is now: replug or cold card → GPIO
+  defaults → MCU/IT6604 setup over SW-I²C → `gl310init --go` → `gl310start --go`.
 - **Task lifecycle.** A second `StartEncoder` after a `StopEncoder` produces no frames;
   the inbound mailbox then shows `cmd 0x50` (encoder stopped). Either send
   `SystemClose` (`0xf3`) first or just reboot the firmware between runs, which takes
