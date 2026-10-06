@@ -2051,3 +2051,19 @@ At 60 Mbps and 30 fps a frame averages about 250 KB, so nearly every frame overf
   continuity breaks. The card then wedged hard (OUT pipe dead; needs a replug).
   **Do not send the release form from the host.** The `(E)Drop`s are better explained
   as a consequence of 60 Mbps frames, and should be re-checked at a sane bitrate.
+
+### Confirmed: at 8 Mbps the stream decodes end to end
+
+`gl310i2c --init --shift 0 --go && gl310init --go && gl310start --go --rate 8000`:
+
+- 7.67 Mbps measured over 5 s; 146 PES, **none over 128 KiB** (IDR 71 KB, P 11–35 KB)
+- the first PES is `[AUD, SPS, PPS, IDR]`: 5 SPS/PPS/IDR sets in 5 s, so GOP 30 at 30 fps
+- **ffmpeg decodes 146 frames at 1920x1080 with zero errors**, using the card's own
+  parameter sets and no vendor data. The frames show the live HDMI source cleanly.
+- fragments arrive from 99 ms to 4969 ms, so 146 frames in 4.87 s = 30.0 fps; no output
+  frames are missing.
+- The firmware log still shows `(E)Drop` about once per frame interval. The output is
+  complete, and the input is 1080i at about 60 fields/s converted to `out_frame_rate(30)`,
+  so this is probably frame-rate decimation. Not proven.
+
+The video path works. What remains is plumbing: a live reader and a virtual camera.
