@@ -1377,8 +1377,78 @@ structurally perfect transport stream with no picture in it, the camera was not 
 problem — the receiver was seeing the signal all along. Whatever is missing is between
 the receiver and the encoder's video input unit.
 
-Note what that implies: **the MCU appears to configure the receiver autonomously.** We
-have never written a single receiver register, yet it reports a locked 1080i signal.
+We have never written a single receiver register, yet it reports a locked 1080i signal.
+That is suggestive but **not proof** that the MCU configures the receiver autonomously —
+see [§ Still open, stated honestly](#still-open-stated-honestly).
+
+### Proven by static analysis, then tested
+
+The earlier claims in this section were inference. Here is what is actually
+established, with the test that settles each.
+
+**1. `CADI7441` uses HW I²C at slave `0x21`.** `CADI7441_Constructor` stores arg6 into
+`this[0x3a8]` and arg7 into `this[0x3b0]`; the call site in `CQLCodecLib_CreatePeripherals`
+(`0x44628`) passes `lib->[0x208] + 0x38` and the immediate **`0x21`**. `writeRegister`
+(`0x9aa30`) calls slot `+8` of `this[0x3a8]`, i.e. `CI2C + 0x38 + 8 = CI2C + 0x40`, the
+write slot. `lib->[0x208]` is the **first** CI2C constructed (`0x44db3`), and the log's
+first `CI2C_Constructor() type(%d)` line is `type(1)` — whose slots resolve to
+`CUsbCntl_I2C*`, ops `0x08`/`0x05`. So: HW I²C, slave `0x21`. Not `0x31`/`0x35` — those
+are separate literals used only inside `CADI7441_InitDevice`.
+
+**2. Op `0x08` is implemented by the device; it is the transaction that fails.**
+Tested by comparing against a deliberately invalid opcode:
+
+```
+op 0x7f (invalid)  -> LIBUSB_ERROR_TIMEOUT, no reply at all
+op 0x08 (HW I2C)   -> replies 00 00   (status 0x00)
+op 0x0c (SW I2C)   -> replies 00 08   (status 0x08)
+```
+
+An unimplemented opcode produces no reply. Op `0x08` replies, so it is dispatched and
+the I²C transaction itself is failing.
+
+**3. SW I²C status codes: `0x08` = ACK, `0x06` = NAK.** Tested on a card where the
+MCU's presence is independently known: `0x15` returns `0x08`, `0x21` returns `0x06`.
+
+**4. SW I²C works with the firmware running too.** Previously claimed otherwise. Tested
+back to back in one session: loader mode `0x15` → `0x08`; after `gl310init --go`,
+`0x15` → `0x08` again. The earlier `0x06`-for-everything observation came from a card
+already degraded by a capture run. **The firmware string
+`QPSOSI2CTransfer: Software (GPIO) I2C not supported` describes QPSOS's *internal*
+i2c.c, not the host command path**, and must not be read as "op 0x0c is unsupported".
+
+**5. Error-level logging was enabled in the Windows capture**, so an absent error
+message is meaningful. Extracted all 828 level-2 format strings from the driver and
+grepped the log: 18 appear, including `CQLCodec_InitDevice() config to use external
+Audio FW`. Since neither `CADI7441_WriteBlock() ... writeRegister failed` nor
+`CUsbCntl_I2CWrite() Failed I2C status` appears, **the ADV7441 writes genuinely
+succeeded on Windows.** That retracts the guess that the `CADI7441` path is vestigial.
+
+**6. `QPHCI_Init` is not the gate.** Counting *all* calls to the register-write slot
+rather than only immediate-numbered ones: `QPHCI_Init` makes **5** register writes,
+`QPHCI_ReInit` makes **5**, and neither reads any. Its extra bulk is thread creation and
+`QPHCI_PowerUp`, which is a proven no-op when field `0x3c8 == 8`.
+
+**7. The HCI windows come up already configured** on a freshly plugged card
+(`0x81c = 0x4000`, `0x820 = 0x103fff`, ...), so the loader programs them itself.
+Re-applying the `QPHCI_ReInit` sequence changed nothing and did not revive HW I²C.
+
+**8. `0x50` bit 8 (pad power-down) is already clear** on a fresh card (`0x50 = 0x404`),
+so pad power is not gating I²C either.
+
+### Still open, stated honestly
+
+HW I²C (op `0x08`) returns status `0x00` for **every** address in **every** state
+tested — loader mode, firmware running, before and after HCI setup, with and without
+GPIO defaults. Yet the same transport demonstrably worked on Windows. Nothing found so
+far accounts for the difference. Candidates not yet eliminated: the Windows card had a
+*previous driver session* still resident (its teardown is at the head of the log), so
+the ARM was running that session's firmware at 4.93 s rather than a loader; and the HW
+I²C master may need configuration done somewhere not yet located.
+
+Consequently **it is not established** whether the MCU configures the receiver
+autonomously. What *is* established is that the receiver reports a locked 1080i signal
+without us having written any receiver register.
 
 ### The bridge works, but cannot be used to probe
 
@@ -1406,10 +1476,10 @@ and 40. Source 20 is what the log shows, and its table is:
 `CADI7441_SetVideoRes` similarly writes tables for 640x480, 720x480, 720x576, 1280x720
 and 1920x1080 at 25 or 50 fps.
 
-All of this is I²C to slaves `0x31`/`0x35`, which **do not answer on the host bus** —
-only the MCU does. Combined with the receiver already being locked without our help,
-the likeliest reading is that the `CADI7441` path belongs to a sibling board and fails
-silently here. It is recorded in case that turns out to be wrong.
+**That guess was wrong.** Error-level logging was enabled in the Windows capture and no
+I²C failure was recorded, so these writes succeeded there. The `CADI7441` path is real
+on this board; it is our HW I²C that does not work. The register tables are therefore
+worth keeping, and the open question is why op `0x08` fails here.
 
 ### The step we still skip
 
