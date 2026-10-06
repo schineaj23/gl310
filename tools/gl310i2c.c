@@ -104,17 +104,60 @@ static int i2c_write(unsigned int slave, const unsigned char *d, int len) {
     return r[0];
 }
 
+/* MemoryWrite, op 0x02 sub 1: byte address, shifted >>2 internally. */
+static int mem_write(unsigned int ba, unsigned int val) {
+    unsigned char c[16]; unsigned int w = ba >> 2;
+    c[0]=0x02; c[1]=0x01; c[2]=4; c[3]=0;
+    c[4]=w&0xff; c[5]=(w>>8)&0xff; c[6]=(w>>16)&0xff; c[7]=(w>>24)&0xff;
+    c[8]=w&0xff; c[9]=(w>>8)&0xff; c[10]=(w>>16)&0xff; c[11]=(w>>24)&0xff;
+    c[12]=val&0xff; c[13]=(val>>8)&0xff; c[14]=(val>>16)&0xff; c[15]=(val>>24)&0xff;
+    return cmd(c, 16, NULL, 0);
+}
+static int reg_write(unsigned int reg, unsigned int val) {
+    unsigned char c[12];
+    c[0]=0x01; c[1]=0x01; c[2]=1; c[3]=0;
+    c[4]=reg&0xff; c[5]=(reg>>8)&0xff; c[6]=0; c[7]=0;
+    c[8]=val&0xff; c[9]=(val>>8)&0xff; c[10]=(val>>16)&0xff; c[11]=(val>>24)&0xff;
+    return cmd(c, 12, NULL, 0);
+}
+
+/* CQLCodec_FWSwitchMode (0x58eb0), QPSOS2 branch. The mode flags live at DRAM
+   0x2f1090 and 0x2f2004 - note gl310init does NOT overwrite those, it only writes
+   0x0 and 0x100000, so they survive a firmware reload and must be cleared
+   explicitly. That is what --unswitch is for.
+
+   DO NOT RUN THIS unless you can physically replug the card. Tried once: the device
+   vanished from USB completely - not a stalled gadget, not enumerated at all, gone
+   from ioreg - and only a replug brought it back. Switching mode evidently tears down
+   the USB gadget, and in the mode it lands in nothing re-advertises it. A replug does
+   clear DRAM, so the flags do not persist and the card comes back healthy; but
+   --unswitch can only help if the device is still reachable, which after --switch it
+   is not. Kept for the record and because the decoded sequence is correct. */
+static void switch_mode(unsigned int flag) {
+    printf("  DRAM 0x2f1090 <- %u\n", flag);
+    mem_write(0x2f1090, flag);
+    printf("  DRAM 0x2f2004 <- %u\n", flag);
+    mem_write(0x2f2004, flag);
+    reset_arm(0);
+    usleep(1000);
+    reg_write(0x6cc, 0);
+    reset_arm(1);
+    usleep(400000);
+}
+
 /* The two register blocks from CADI7441_InitDevice, in order. */
 static const unsigned char BLOCK_A[][2] = { {0xf0,0x10}, {0xf1,0x0f}, {0xf4,0x20} };
 static const unsigned char BLOCK_B[][2] = { {0x14,0x1f}, {0x15,0xec}, {0x1c,0x49},
                                             {0x1d,0x04}, {0x5a,0x01} };
 
 int main(int argc, char **argv) {
-    int scan = 0, go = 0, init = 0, hold = 1, shift = 1;
+    int scan = 0, go = 0, init = 0, hold = 1, shift = 1, swmode = 0;
     unsigned int rd_slave = 0; int rd_sub = -1, rd_n = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--scan")) scan = 1;
         else if (!strcmp(argv[i], "--sw")) sw = 1;
+        else if (!strcmp(argv[i], "--switch")) swmode = 1;
+        else if (!strcmp(argv[i], "--unswitch")) swmode = 2;
         else if (!strcmp(argv[i], "--go")) go = 1;
         else if (!strcmp(argv[i], "--init")) init = 1;
         else if (!strcmp(argv[i], "--no-hold")) hold = 0;
@@ -139,6 +182,15 @@ int main(int argc, char **argv) {
     dev = libusb_open_device_with_vid_pid(NULL, VID, PID);
     if (!dev) { fprintf(stderr, "cannot open %04x:%04x\n", VID, PID); return 1; }
     if (libusb_claim_interface(dev, 0)) { fprintf(stderr, "claim failed\n"); return 1; }
+
+    if (swmode) {
+        if (!go) { printf("Would %s firmware mode (FWSwitchMode flags at 0x2f1090 / 0x2f2004).\n"
+                          "Re-run with --go.\n", swmode==1?"set":"clear"); goto done; }
+        printf("%s the FWSwitchMode flags and restarting the ARM.\n",
+               swmode==1?"Setting":"Clearing");
+        switch_mode(swmode==1 ? 1u : 0u);
+        hold = 0;
+    }
 
     if (hold) {
         printf("Holding the ARM in reset (the state the driver does I2C in).\n");
@@ -200,6 +252,7 @@ int main(int argc, char **argv) {
         }
     }
 
+done:
     if (hold) printf("\nARM still held in reset - run gl310init --go to boot it.\n");
     libusb_release_interface(dev, 0); libusb_close(dev); libusb_exit(NULL);
     return 0;

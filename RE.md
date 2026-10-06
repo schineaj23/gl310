@@ -1223,12 +1223,60 @@ Uniform, address-independent failure. `0x06` matches the firmware's own
 refuses it too. `0x00` on the HW path looks like the command is accepted but the
 master does nothing.
 
-**Leading hypothesis: the I²C master is never enabled, because we only ever run
-`QPHCI_ReInit`.** The driver also has `QPHCI_Init` (`0x49d40`, 3598 B, versus 811 B for
-ReInit) which runs once at device start and reads `QLCODEC_REG_CHIP_VERSION`; our
-bring-up copies `CQLCodec_FWDownloadAll`, which only calls ReInit because `Init`
-already happened earlier in the driver's life. Decoding the difference — particularly
-any I²C clock or enable register — is the next step.
+**The `QPHCI_Init` hypothesis is wrong.** Its extra 2800 bytes over `ReInit` are
+thread creation (`EMU_ThreadProc`), `QPHCI_PowerUp` and a `QLCODEC_REG_CHIP_VERSION`
+read — no I²C clock or enable. Both functions write the same window descriptors and
+`0x840` twice, and nothing else by immediate register number.
+
+**The command encoding is not wrong either.** `CUsbCntl_I2CRead` (`0x84c20`) builds
+exactly `08 00 rlen:u16 slave:u32`, command length 8, reply `rlen+1`, with the slave a
+zero-extended **byte** — which is what `gl310i2c` sends, and the scan covers all 256
+byte values.
+
+**The real reason is that the running firmware has no I²C at all.** Its USB gadget
+implements only three commands, and the whole set is visible in its string table:
+
+```
+ql300 got cmd HIU_REG %s, wLong %d, dwAddr 0x%08X
+ql300 got cmd RESET_ARM %s
+ql300 got cmd IIC_W_Multi not impl
+unknown cmd: %08X %08X : %d
+```
+
+Register access and ARM reset, and I²C explicitly *not implemented*. So with
+`qpvidfwusb.bin` running, op `0x08` and op `0x0c` can never work — matching the
+uniform `0x00` and `0x06` statuses exactly. The vendor driver does its ADV7441 I²C at
+t=4.93 s, **before** this image is ever downloaded, so it is talking to something else:
+the boot loader the chip comes up in.
+
+### `CQLCodec_FWSwitchMode`, and why not to run it
+
+The driver can move the ARM between loader and main firmware — the gadget's
+`RESET_ARM` handler prints `be in loader` / `be in main` / `still in loaderFw` /
+`still in mainFw`. `CQLCodec_FWSwitchMode` (`0x58eb0`) is the mechanism. It reads the
+`QSOS` header at DRAM `0x100`, takes the version from the halfword at `0x102`, picks an
+entry base (`0x2f2000` for QPSOS2, `0xf2000` for QPSOS3+), then:
+
+```
+MemoryWrite(0x2f1090, 1)
+MemoryWrite(0x2f2004, 1)     /* base + 4 */
+ResetArm(0)
+DelayMilliS(1)
+RegisterWrite(0x6cc, 0)
+ResetArm(1)
+```
+
+> **Do not run this without being able to replug the card.** Tried once: the device
+> disappeared from USB entirely — not a stalled gadget, not enumerated at all, absent
+> from `ioreg`. Only a physical replug brought it back. The mode switch tears down the
+> gadget and whatever it lands in never re-advertises itself. A replug does clear DRAM,
+> so the flags do not persist and the card returns healthy, but `--unswitch` is useless
+> because by then the device is unreachable.
+
+So reaching the loader is the open problem. Options not yet explored: whether the chip
+runs the loader *before* any firmware download (i.e. do the I²C init on a freshly
+plugged card, which is exactly the vendor's ordering, and is the one state never
+tested), and what the loader's own USB identity is.
 
 GPIO `0x618` reads `0x0000ff1f`, so bit 12 is set, matching
 `QPCODEC_GPIO_BIT_VALUE bit(12) val(1)` in the working session. `AVer_GPIOI2C` turned
@@ -1324,11 +1372,11 @@ clearly on the critical path.
 - **Transport is done.** The consumed-count ack gives 100% TS continuity with zero
   loss, so asynchronous I/O is no longer on the critical path - it is a latency and
   CPU optimisation for later.
-- **Get the I²C master working.** The ADV7441 init sequence, its addresses, the
-  ordering and the reply format are all recovered, but no slave answers on either
-  transport in either ARM state. Decode `QPHCI_Init` (`0x49d40`) against
-  `QPHCI_ReInit` (`0x4aca0`) and apply whatever it does that we skip — most likely an
-  I²C clock or enable. Then replay the eight writes with `gl310i2c --init --go`.
+- **Reach the boot loader, which is where I²C lives.** The main firmware's gadget has
+  no I²C at all, so the ADV7441 init must happen before `gl310init --go` ever runs —
+  the vendor's own ordering. The untested state is a **freshly plugged card, before
+  any firmware download**: run `gl310i2c --scan` there first. If slaves answer, replay
+  the eight writes with `gl310i2c --init --go`, then download firmware and capture.
 - **Task lifecycle.** A second `StartEncoder` after a `StopEncoder` produces no frames;
   the inbound mailbox then shows `cmd 0x50` (encoder stopped). Either send
   `SystemClose` (`0xf3`) first or just reboot the firmware between runs, which takes
