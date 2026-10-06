@@ -233,11 +233,14 @@ static int prop(const char *label, unsigned int sel,
 
 int main(int argc, char **argv) {
     int go = 0, stop = 0, watch_s = 5, keep = 0, idle_us = 1000;
+    int stream_type = -1;   /* bits 0-2 of SystemControl, 0x6f8 */
     const char *outpath = "gl310-capture.bin";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--go")) go = 1;
         else if (!strcmp(argv[i], "--stop")) stop = 1;
         else if (!strcmp(argv[i], "--keep")) keep = 1;
+        else if (!strcmp(argv[i], "--stream-type") && i + 1 < argc)
+            stream_type = (int)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--idle-us") && i + 1 < argc) idle_us = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch_s = atoi(argv[++i]);
@@ -287,7 +290,15 @@ int main(int argc, char **argv) {
 
     printf("\n  encoder config block:\n");
     for (int i = 0; i < NCONFIG; i++) {
-        if (reg_write(CONFIG[i].reg, CONFIG[i].val)) goto out;
+        unsigned int v = CONFIG[i].val;
+        /* SystemControl packs: bits 0-2 stream type, 3-7 stream data, 8-11 profile,
+           12-15 level. 0x2101c219 = type 1, data 3, profile 2, level 12, matching the
+           log's "stream type(1) stream data(3) profile(2) level(12)". */
+        if (CONFIG[i].reg == 0x6f8 && stream_type >= 0) {
+            v = (v & ~7u) | ((unsigned)stream_type & 7u);
+            printf("    stream type -> %d  (0x%08x)\n", stream_type, v);
+        }
+        if (reg_write(CONFIG[i].reg, v)) goto out;
         printf("    0x%03x = 0x%08x   %s\n", CONFIG[i].reg, CONFIG[i].val, CONFIG[i].what);
     }
 

@@ -1721,3 +1721,85 @@ read-only and ignores writes).
 | `gl310armtest` | bare ARM stub loader | **destroys the image header at `0x100`** |
 | `sysmap.py` | name/disassemble the driver by its debug strings | static |
 | `fwarm.py` | ARM32 firmware analysis | static |
+
+## Prior art: sibling devices and what they tell us
+
+Searched for other AVerMedia reverse-engineering work, because this hardware family is
+clearly shared and someone else may have solved parts of it.
+
+### `FireCulex/avermedia-c985-linux` — the closest relative by far
+
+A Linux V4L2 driver for the **AVerMedia C985 (Live Gamer HD)**, described as
+implementing the card's *"vendor-specific mailbox-based firmware protocol,
+reverse-engineered from the Windows driver and ARM firmware"*. The correspondence with
+this card is extremely close:
+
+| C985 (PCIe) | GL310 / C835 (USB) |
+|-------------|--------------------|
+| Nuvoton **NUC100**RD2BN MCU | Nuvoton NUC100, 7-bit `0x15` |
+| `qpvidfwpcie.bin` + `qpaudfw.bin` | `qpvidfwusb.bin` + `qpaudfwusb.bin` |
+| mailbox protocol, debugfs `mbox_log` | mailbox at `0x6b0`/`0x6cc`/`0x6fc` |
+| `c985_nuc100.c` MCU register access | `InterfaceNUC100::accessRegs_viaNUC` |
+| `cpr.c` CPR register helpers | `CPR_MemoryRead` / `CPR_MemoryWrite` in our driver |
+| firmware-managed **4-slot ring buffer** | the ring we read via `cmd 0x40` |
+
+So the same vendor stack spans PCIe and USB variants, which is why our driver binary
+carries `CPCIeCntl_*` alongside `CUsbCntl_*`. The two families differ only in transport.
+
+**The interesting divergence: the C985 driver outputs YUV420 (YU12) 1920x1080, not
+H.264.** Its README mentions no SPS/PPS or H.264 parsing at all.
+
+### This card has a raw path too
+
+Confirmed locally, in our own binary and log:
+
+```
+CTaskRawVideo::CTaskRawVideo / getOutputResolution / setOutputResolution
+CDevice::allocateRawVideoOuputTask / releaseRawVideoOuputTask
+%s(): ARM_BUF_YUV / ARM_BUF_YUVMB2RAS / ARM_BUF_YUVRAS / ARM_BUF_OTHERS
+CTask_BuildIoBlockYUV / CTask_BuildIoBlockYUVMB2RAS / CTask_BuildIoBlockYUVRAS
+```
+
+and from the Windows session:
+
+```
+CDevice::Init release the raw tasks (m_dwDisableRawOutput = 1)
+```
+
+**Raw video output exists on this hardware and the Windows driver switched it off via a
+registry value.** Every buffer we have captured was `ARM_BUF_OTHERS` (the compressed
+path); `ARM_BUF_YUV*` are dispatched on `[rsp+0x7c]` in
+`CEncoderTask_ProcessArmMessage`, i.e. selected by how the task is configured.
+
+Raw YUV would be strictly better for a webcam: no SPS/PPS problem, no decoder, lower
+latency. It is now the most promising direction.
+
+### `SystemControl` decoded — and the stream type is fixed at TS
+
+The log prints `QPCODEC_PROP_SYSTEM_CONTROL stream type(1) stream data(3) profile(2)
+level(12) ff_mod(1)`, and `CQLCodec_Set`'s packing of that property gives register
+`0x6f8`:
+
+| bits | field | value in `0x2101c219` |
+|------|-------|----------------------|
+| 0-2 | stream type | **1** |
+| 3-7 | stream data | 3 |
+| 8-11 | profile | 2 |
+| 12-15 | level | 12 |
+
+which reproduces the logged values exactly, so the decode is confirmed.
+
+**Tested: stream type is not the lever.** Sweeping bits 0-2 with everything else held
+constant, rebooting the firmware between runs:
+
+| stream type | result |
+|-------------|--------|
+| 0 | 0 fragments |
+| 1 | 507 fragments in 2 s (control, works) |
+| 2 | 0 fragments |
+| 3 | 0 fragments |
+| 4 | 0 fragments |
+
+Only TS produces output in this configuration. Selecting the raw path must therefore
+happen elsewhere — the task/channel `dataType`, or `SYS_FUNCTION` (`0x80000011`), or
+`SYS_LINK`'s `video_output` field — not in `SystemControl`.
