@@ -1970,3 +1970,84 @@ vendor's, or it does not and the decoder is given the parameters some other way.
 Failing that, recording a few seconds in RECentral and extracting the SPS/PPS from the
 resulting file works just as well — they depend only on the encoder configuration,
 which we reproduce byte for byte.
+
+## The real defect: 60 Mbps into a 128 KiB bitstream buffer
+
+> **Update 2026-10-06.** The P-frames we capture are valid H.264. They decode with zero
+> errors once given the right parameter sets. What breaks the stream is the configured
+> bitrate.
+
+### Correction: RECentral does not use our configuration
+
+The last section assumed RECentral's SPS/PPS would fit our stream because "we reproduce
+the configuration byte for byte". That assumption was wrong. RECentral's recording is
+CABAC (`entropy_coding_mode_flag = 1`) at about 12 Mbps. Our configuration, copied from the
+driver session in `gl310-bringup-debugview.log`, says:
+
+```
+QPCODEC_PROP_RATE_CONTROL bitrate(60000) qp_update(120) mode(0) fixed(0) vbr(0)
+QPCODEC_PROP_SYSTEM_CONTROL stream type(1) stream data(3) profile(2) level(12) ff_mod(1)
+    spsr_freq(1) v_mode(0) cabac_init(0) ver(1) xfer_mode(0)
+```
+
+That is **CBR 60 Mbps, CAVLC**. `RateControl` = `0x0078ea60`: the low 16 bits are the
+bitrate in kbps (0xea60 = 60000), and bits 16+ are qp_update (0x78 = 120). `VBRBitRate`
+(`0x6e8`) is unused when vbr = 0, which is why changing it never moved the output rate.
+
+### Our P-slices decode cleanly
+
+The slice headers of our PES 1–3 (`41 e0 08 10 04 31 83 07 f0…`) show frame_num 1, 2, 3
+and POC 2, 4, 6. That matches the vendor SPS layout: 10-bit frame_num, 8-bit POC lsb. Read
+with the vendor PPS, the next field is `cabac_init_idc = 31`, which is invalid.
+
+Each candidate PPS was rebuilt and fed to ffmpeg together with our three P-frames
+(scratchpad `ppstest.py`), keeping the vendor SPS:
+
+| entropy | deblock ctrl | transform_8x8 | ffmpeg errors |
+|---|---|---|---|
+| CABAC | any | any | 16 (`cabac_init_idc 31 overflow`) |
+| CAVLC | 0 | any | 6 |
+| CAVLC | 1 | absent / 0 | 8 (`P sub_mb_type 32 out of range`) |
+| **CAVLC** | **1** | **1** | **0** |
+
+Three full frames, 3 × 8160 macroblocks, parse with no errors. Random data parsed as
+CAVLC fails within a few macroblocks. Rendered over a gray reference, the frames show
+recognisable picture content: a face outline and the pillarbox edges.
+
+### Why the IDR and some P-frames are garbage
+
+In each capture's first PES (the IDR, about 195 KB), the bytes at offset *k* reappear at
+*k* + 131072. The same holds for every 4 KiB probe from 6 to 61446, in both `full.bin`
+and `delay20.bin`. The encoder writes into a **128 KiB circular bitstream buffer**, and a
+frame larger than that overwrites its own beginning: AUD, then SPS, PPS and the slice
+header. The data fits this exactly:
+
+| capture | PES | size | result |
+|---|---|---|---|
+| full.bin | 0 (IDR) | 195610 | head overwritten |
+| full.bin | 1–3 (P) | 95162–127550 | clean `[AUD, slice]` |
+| full.bin | 4 (P) | 151754 | head overwritten, wraps at 131078 |
+
+At 60 Mbps and 30 fps a frame averages about 250 KB, so nearly every frame overflows.
+**The fix is to lower RateControl's bitrate**: `gl310start --rate KBPS`.
+
+### Firmware: how frame slots are released
+
+- Host cmd `0x30` reaches the ARM as internal message `0xf7`, built by the HCI handler at
+  `0x2d5d8`. Its fields are:
+  - `[8]` = task (`0x6fc >> 16`)
+  - `[0x10]` = `0x6f8 & 0x8f`
+  - `[0x14]` = `0x6e4 & 0xff`
+  - `[0x1c]` = `0x6f4`
+  - `[0x20]` = `0x6ec ? 0x6f0 : 0x80000000`
+  - `[0x24]` = per-task queue
+- The encoder's `0xf7` case (`0x3c790`) frees a frame slot (`0x3c7bc`, the only store
+  that clears slot state) when `[0x20] == task | 0xffff0000`. The drop check is at
+  `0x3e4c0`. The same tag is forwarded by another task at `0x1fcb0` from a per-buffer
+  field (`+0x558`), so the release normally comes from inside the firmware, not from
+  the host.
+- Test: `--ack-mode 2` (plain ack, then the release form, for every frame) raised
+  throughput to 24 Mbps but destroyed the content: 1 PES start in 14 MB, 260
+  continuity breaks. The card then wedged hard (OUT pipe dead; needs a replug).
+  **Do not send the release form from the host.** The `(E)Drop`s are better explained
+  as a consequence of 60 Mbps frames, and should be re-checked at a sane bitrate.

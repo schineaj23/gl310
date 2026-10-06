@@ -239,6 +239,10 @@ int main(int argc, char **argv) {
     int rawfmt = -1;        /* SetRawVideoDecimation output_format, sel 0x11 */
     unsigned int ringdump = 0, ringlen = 0;
     long bitrate = -1;   /* VBRBitRate 0x6e8: hi16 peak, lo16 avg, both kbps */
+    long rate_kbps = -1; /* RateControl 0x6ec low 16 bits: the CBR target, kbps */
+    int read_delay_us = 0; /* wait after a cmd 0x40 before DMA-reading it */
+    int ack_mode = 0;      /* 0 plain, 1 release tag only, 2 plain then release tag */
+    int ack_task = -1;     /* task field of the ack; default: from the incoming msg */
     const char *outpath = "gl310-capture.bin";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--go")) go = 1;
@@ -252,6 +256,14 @@ int main(int argc, char **argv) {
             capmode = (int)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--raw-format") && i + 1 < argc)
             rawfmt = (int)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--read-delay-us") && i + 1 < argc)
+            read_delay_us = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ack-mode") && i + 1 < argc)
+            ack_mode = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ack-task") && i + 1 < argc)
+            ack_task = (int)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--rate") && i + 1 < argc)
+            rate_kbps = strtol(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--bitrate") && i + 1 < argc)
             bitrate = strtol(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--ring-dump") && i + 2 < argc) {
@@ -335,6 +347,16 @@ int main(int argc, char **argv) {
             v = (unsigned)bitrate;
             printf("    VBRBitRate -> 0x%08x (%u peak / %u avg kbps)\n",
                    v, v >> 16, v & 0xffff);
+        }
+        /* RateControl: the session log prints 0x0078ea60 as "bitrate(60000)
+           qp_update(120) mode(0) fixed(0) vbr(0)" - low 16 bits are the CBR target
+           in kbps, so the session ran at 60 Mbps and VBRBitRate above is unused.
+           At 60 Mbps a frame averages ~250 KB, but the encoder's bitstream buffer
+           wraps at 128 KiB: any larger frame overwrites its own head (SPS, PPS,
+           slice header). Frames under 128 KiB come out as clean CAVLC slices. */
+        if (CONFIG[i].reg == 0x6ec && rate_kbps >= 0) {
+            v = (v & 0xffff0000u) | ((unsigned)rate_kbps & 0xffffu);
+            printf("    RateControl -> 0x%08x (CBR %u kbps)\n", v, v & 0xffff);
         }
         if (CONFIG[i].reg == 0x6f8 && stream_type >= 0) {
             v = (v & ~7u) | ((unsigned)stream_type & 7u);
@@ -420,6 +442,9 @@ int main(int argc, char **argv) {
         if ((msg & 0xff) == 0x40) {
             unsigned int addr = p[1] << 2;          /* p2 is a word address */
             unsigned int nbytes = p[3] * 4;         /* p4 is a word count   */
+            /* Test for a header-before-payload race: valid TS headers wrapped
+               around stale 0x10 fill suggest we read before the payload lands. */
+            if (read_delay_us > 0) usleep((unsigned)read_delay_us);
             if (nbytes && nbytes <= (1u << 20)) {
                 unsigned int done = 0; int ok = 1;
                 while (done < nbytes) {
@@ -448,8 +473,8 @@ int main(int argc, char **argv) {
                         printf("    first buffer: p1(stream type) = 0x%02x  %s\n", p[0],
                                p[0]==0x80 ? "<- ARM_BUF_YUV!" : (p[0]==0x83 ? "(compressed)" : ""));
                     if (verbose)
-                        printf("  [%5ld ms] cmd 0x%02x  addr 0x%06x  %u B  last=%u\n",
-                               ms, msg & 0xff, addr, done, p[2]);
+                        printf("  [%5ld ms] msg 0x%08x  addr 0x%06x  %u B  last=%u\n",
+                               ms, msg, addr, done, p[2]);
                 }
             }
             /* Return the buffer. CTask_CompleteArm (0x725d0) dispatches on the
@@ -479,19 +504,36 @@ int main(int argc, char **argv) {
 
                Single writes, not RegisterWriteEx: op 0x03 misplaces values on this
                device (see RE.md), so only the read side is batched. */
-            struct { unsigned int reg, val; } ack[] = {
-                { 0x6f8, p[0]      },   /* type                      */
-                { 0x6f4, p[3]      },   /* consumed length, in words */
-                { 0x6f0, p[4] >> 2 },   /* PTS                       */
-                { 0x6ec, 0         },   /* valid                     */
-                { 0x6e4, 0         },   /* 0x1e4, unnamed            */
-            };
+            /* The ARM's HCI handler (0x2d5d8) turns host cmd 0x30 into an internal
+               message 0xf7: [8] = task (0x6fc >> 16), [0x10] = 0x6f8 & 0x8f,
+               [0x1c] = 0x6f4, [0x14] = 0x6e4 & 0xff, and
+               [0x20] = (0x6ec != 0) ? 0x6f0 : 0x80000000.
+               The encoder's 0xf7 case (0x3c790) frees a frame slot - the only
+               place that does (0x3c7bc) - when [0x20] == task | 0xffff0000.
+               With valid = 0 that can never match, and from frame ~10 on every
+               frame is "(E)Drop"ped for want of a free slot (0x3e4c0).
+               --ack-mode 1 sends that release form instead of the plain ack;
+               --ack-mode 2 sends the plain ack and then the release. */
+            unsigned int task = ack_task >= 0 ? (unsigned)ack_task : (msg >> 16) & 0xff;
             int bad = 0;
-            for (int i = 0; i < (int)(sizeof ack / sizeof ack[0]) && !bad; i++)
-                bad = reg_write(ack[i].reg, ack[i].val);
+            for (int pass = 0; pass < 2 && !bad; pass++) {
+                int release = (ack_mode == 1) || (ack_mode == 2 && pass == 1);
+                if (pass == 1 && ack_mode != 2) break;
+                if (pass == 1 && wait_free(200) < 0) { bad = 1; break; }
+                struct { unsigned int reg, val; } ack[] = {
+                    { 0x6f8, p[0]      },   /* type                      */
+                    { 0x6f4, p[3]      },   /* consumed length, in words */
+                    { 0x6f0, release ? (0xffff0000u | task) : (p[4] >> 2) },
+                    { 0x6ec, release ? 1u : 0u },   /* valid             */
+                    { 0x6e4, 0         },   /* 0x1e4, unnamed            */
+                };
+                for (int i = 0; i < (int)(sizeof ack / sizeof ack[0]) && !bad; i++)
+                    bad = reg_write(ack[i].reg, ack[i].val);
+                if (bad) break;
+                if (reg_write(R_TO_ARM_STATUS, (task << 16) | 1u)) { bad = 1; break; }
+                if (reg_write(R_TO_ARM_MSG, (task << 16) | 0x30u)) { bad = 1; break; }
+            }
             if (bad) break;
-            if (reg_write(R_TO_ARM_STATUS, 1u)) break;
-            if (reg_write(R_TO_ARM_MSG, 0x30u)) break;
         }
         /* AckARMMessage (0x5afca) clears bit 0 of the inbound status and writes it
            back. Bit 0 is the inbound busy flag, mirroring bit 0 of 0x6cc. */
