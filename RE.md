@@ -2067,3 +2067,51 @@ At 60 Mbps and 30 fps a frame averages about 250 KB, so nearly every frame overf
   so this is probably frame-rate decimation. Not proven.
 
 The video path works. What remains is plumbing: a live reader and a virtual camera.
+
+## Live streaming: `tools/gl310live`
+
+```
+tools/gl310live | ffplay -fflags nobuffer -flags low_delay -framedrop -
+```
+
+`gl310start --out -` writes a plain MPEG-TS to stdout. It un-swaps the 32-bit words and
+sends every diagnostic to stderr. `--watch 0` runs until Ctrl-C or the reader goes
+away; either one goes through the normal quiesce → StopEncoder → firmware-reboot path,
+and both were tested with the card still answering afterwards. The wrapper applies the
+receiver init, boots the firmware and execs `gl310start`. Defaults: 8 Mbps CBR.
+
+Verified over 100 s: 2995 frames (29.95 fps), 0 decode errors, 0 continuity breaks.
+The short tests had hidden three problems.
+
+### 1. IDR size creeps past the bitstream buffer → encoder breakdown
+
+The IDR grows every GOP at a fixed CBR target (73, 81, 97, 102, 115, 132 KB…). The first
+one over 128 KiB overwrites itself, and within a GOP or two the firmware falls into a
+loop re-sending ~40 KB chunks at ~30 Mbps. That happened 6–9 s into every run.
+
+The 128 KiB came from **LargeCompressBuffer** (property sel `0x14`). The driver logs a
+single value, `0x80004a38`, but the firmware handler (`0x2ab8c`) stores two words:
+p2 → `cfg+0x134` (enable) and p3 → `cfg+0x138` (size). The allocator (`0x33e10`) uses
+`align(cfg+0x138 × 96)`, clamped to ≥ 0x20000, when +0x134 is set. We sent only p2,
+so p3 was a stale register and the buffer fell to the 128 KiB minimum. Sending
+p3 = `0x4a38` (19000 × 96 ≈ 1.8 MB) removes the wrap: at 20 Mbps, frames of 143–173 KB
+come through intact, with 0 decode errors. The compressed ring grew with it, from
+95 KB to 1.79 MB (words `0x102f00..0x170200`). Without p3 the ring ended at `0x108c00`.
+
+`BlockSize` (`0x6d8`) is not the buffer size: changing it to 0x20 left the wrap at
+131072.
+
+### 2. Stale notifications lose fragments
+
+About once every 20 s, a frame notification arrives carrying the previous fragment's
+p2/p4. Its data is byte-identical to the previous fragment, and the fragment really
+being announced is skipped: the ring jumps by exactly one fragment afterwards. The ready
+flag becomes visible before the new params do; one immediate re-read is not enough.
+`gl310start` now treats a repeat of the previous p2/p4 as stale. It polls (200 µs × up
+to 50) until the params change, then handles the real fragment. In 100 s, 6 stale reads
+were recovered and none needed the repeat fallback.
+
+### 3. The first test hang was a test bug
+
+`ffmpeg -t 8` combined with a one-frame `select` never terminates. It was not a
+`gl310live` problem.

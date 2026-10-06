@@ -76,6 +76,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <signal.h>
+#include <errno.h>
 #include <libusb-1.0/libusb.h>
 
 #define VID 0x07ca
@@ -113,6 +115,8 @@ static const struct cfg CONFIG[] = {
 
 static libusb_device_handle *dev;
 static int verbose = 0;
+static volatile sig_atomic_t stop_req = 0;
+static void on_signal(int sig) { (void)sig; stop_req = 1; }
 
 static int cmd(const unsigned char *c, int len, unsigned char *rep, int rlen) {
     int n = 0, r = libusb_bulk_transfer(dev, EP_CMD_WR, (unsigned char *)c, len, &n, TIMEOUT);
@@ -239,7 +243,12 @@ int main(int argc, char **argv) {
     int rawfmt = -1;        /* SetRawVideoDecimation output_format, sel 0x11 */
     unsigned int ringdump = 0, ringlen = 0;
     long bitrate = -1;   /* VBRBitRate 0x6e8: hi16 peak, lo16 avg, both kbps */
-    long rate_kbps = -1; /* RateControl 0x6ec low 16 bits: the CBR target, kbps */
+    long rate_kbps = 8000; /* RateControl 0x6ec low 16 bits: CBR target, kbps.
+                            The session's 60000 overflows the 128 KiB bitstream
+                            buffer (RE.md), so the default is 8000. */
+    unsigned int cfg_reg[8], cfg_val[8]; int ncfg = 0;  /* --cfg REG VAL */
+    int keep_dups = 0;   /* --keep-dups: output repeated notifications too */
+    int ts_out = 0;      /* un-swap the 32-bit words into a plain MPEG-TS */
     int read_delay_us = 0; /* wait after a cmd 0x40 before DMA-reading it */
     int ack_mode = 0;      /* 0 plain, 1 release tag only, 2 plain then release tag */
     int ack_task = -1;     /* task field of the ack; default: from the incoming msg */
@@ -274,8 +283,36 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outpath = argv[++i];
-        else { printf("usage: gl310start [--go] [--stop] [--watch SECS] [--out FILE] [-v]\n"); return 0; }
+        else if (!strcmp(argv[i], "--ts")) ts_out = 1;
+        else if (!strcmp(argv[i], "--keep-dups")) keep_dups = 1;
+        else if (!strcmp(argv[i], "--cfg") && i + 2 < argc && ncfg < 8) {
+            cfg_reg[ncfg] = (unsigned)strtoul(argv[++i], 0, 0);
+            cfg_val[ncfg++] = (unsigned)strtoul(argv[++i], 0, 0);
+        }
+        else { printf("usage: gl310start [--go] [--stop] [--watch SECS|0] [--out FILE|-] [--ts]\n"
+                      "                  [--rate KBPS] [-v]\n"
+                      "  --out -   stream a plain MPEG-TS to stdout (implies --ts; all\n"
+                      "            messages go to stderr), e.g.  gl310start --go --out - | ffplay -\n"
+                      "  --watch 0 run until interrupted (default 5 s)\n"); return 0; }
     }
+    /* Streaming to stdout: keep the real stdout for data only, and point fd 1 at
+       stderr so every diagnostic printf below lands on the terminal instead of in
+       the transport stream. */
+    FILE *data_out = NULL;
+    int to_stdout = !strcmp(outpath, "-");
+    if (to_stdout) {
+        int fd = dup(1);
+        if (fd < 0 || dup2(2, 1) < 0) { perror("dup"); return 1; }
+        setvbuf(stdout, NULL, _IOLBF, 0);   /* now stderr: show progress live */
+        data_out = fdopen(fd, "wb");
+        if (!data_out) { perror("fdopen"); return 1; }
+        ts_out = 1;
+    }
+    /* Ctrl-C, or the consumer going away, ends the capture loop cleanly so the
+       quiesce / StopEncoder / reboot path below still runs. */
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
     if (!go && !stop) {
         printf("Starts the hardware encoder with the exact configuration from the\n"
                "working Windows session (1920x1080 H.264), then watches for frames.\n\n"
@@ -316,7 +353,14 @@ int main(int argc, char **argv) {
     prop("PTSResetByTrigger",     0x10, 0, 0, 0, 3);
     prop("DeinterlaceMode",       0x12, 1, 0, 0, 1);
     prop("RateControlEx",         0x13, 120, 0, 8, 3);
-    prop("LargeCompressBuffer",   0x14, 0x80004a38, 0, 0, 1);
+    /* The driver logs one value, large_compress_buffer_control(0x80004a38), but
+       the firmware's sel 0x14 handler (0x2ab8c) stores TWO words: p2 -> cfg+0x134
+       (enable) and p3 -> cfg+0x138 (size). The encoder sizes its bitstream buffer
+       (0x33e10) as align(cfg+0x138 * 96), clamped to >= 128 KiB, when +0x134 is
+       set. Sending only p2 left p3 as whatever was in 0x6f0, so the buffer was
+       the 128 KiB minimum and any larger frame overwrote its own head. Pass the
+       low bits as the size: 0x4a38 = 19000 -> ~1.8 MB. */
+    prop("LargeCompressBuffer",   0x14, 0x80004a38, 0x4a38, 0, 2);
     prop("AVDiscardControl",      0x16, 2, 0, 0, 1);
     prop("UseSWPTS",              0x17, 1, 0, 0, 1);
     prop("ViuSyncCode",           0x02, 0xf1f1f1da, 0xb6f1f1b6, 0, 2);
@@ -358,6 +402,11 @@ int main(int argc, char **argv) {
             v = (v & 0xffff0000u) | ((unsigned)rate_kbps & 0xffffu);
             printf("    RateControl -> 0x%08x (CBR %u kbps)\n", v, v & 0xffff);
         }
+        for (int k = 0; k < ncfg; k++)
+            if (CONFIG[i].reg == cfg_reg[k]) {
+                v = cfg_val[k];
+                printf("    %s -> 0x%08x (--cfg)\n", CONFIG[i].what, v);
+            }
         if (CONFIG[i].reg == 0x6f8 && stream_type >= 0) {
             v = (v & ~7u) | ((unsigned)stream_type & 7u);
             printf("    stream type -> %d  (0x%08x)\n", stream_type, v);
@@ -399,7 +448,10 @@ int main(int argc, char **argv) {
         goto quiesce;
     }
 
-    printf("\nWatching for frames for %d s (ARM posts cmd 0x40 on 0x6b0) ...\n", watch_s);
+    if (watch_s > 0)
+        printf("\nWatching for frames for %d s (ARM posts cmd 0x40 on 0x6b0) ...\n", watch_s);
+    else
+        printf("\nStreaming until interrupted (Ctrl-C, or close the reader) ...\n");
     FILE *f = NULL, *fidx = NULL;
     long total = 0;
     int frames = 0;
@@ -420,12 +472,16 @@ int main(int argc, char **argv) {
 
     struct timeval t0, now;
     gettimeofday(&t0, NULL);
-    long polls = 0, short_reads = 0, idle = 0;
+    long polls = 0, short_reads = 0, idle = 0, dups = 0;
+    /* Ring position bookkeeping, for spotting re-notifications. */
+    unsigned int last_p2 = ~0u, last_p4 = ~0u;
+    long stale_fixed = 0;
 
     for (;;) {
         gettimeofday(&now, NULL);
         long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_usec - t0.tv_usec) / 1000;
-        if (ms >= (long)watch_s * 1000 || frames >= max_frames) break;
+        if (stop_req) break;
+        if (watch_s > 0 && (ms >= (long)watch_s * 1000 || frames >= max_frames)) break;
 
         /* 0x6b0..0x6cc: msg, p1..p5, inbound status, outbound doorbell - one transfer */
         unsigned int blk[8];
@@ -435,9 +491,36 @@ int main(int argc, char **argv) {
         const unsigned int *p = &blk[1];
         if (!(st & 1)) { idle++; usleep(idle_us); continue; }
 
+        /* The block read returns 0x6b0 (message, params) before 0x6c8 (status).
+           If the ARM posts between the two, we see the NEW ready flag with the OLD
+           params: the previous fragment again, while the real one is lost, and
+           acking the wrong length corrupts the ARM's ring accounting. Seen in 30 s
+           captures as a duplicate followed by a one-fragment gap, and a breakdown
+           ~9 s in. With the flag set the ARM cannot touch the params until we clear
+           it, so a second read is consistent. */
+        if (reg_read_block(R_FROM_ARM_MSG, 8, blk)) break;
+        msg = blk[0]; st = blk[6]; outdoor = blk[7];
+
         /* blk[7] is 0x6cc: if our previous message is still pending, give the
            ARM a moment rather than stacking another one on top of it. */
         if (outdoor & 1) { usleep(idle_us); continue; }
+
+        /* A notification repeating the previous one's p2/p4 is almost always a
+           stale read: the ARM raises the ready flag a moment before the new
+           params are visible, so we see the last fragment's params again - and
+           the fragment really being announced is lost (100 s captures: every
+           repeat was followed by a one-fragment gap). Wait for the params to
+           settle before acting on it. A consecutive fragment can never start at
+           the same address unless the ring holds one fragment, so this test is
+           safe. */
+        if ((msg & 0xff) == 0x40 && p[1] == last_p2 && p[3] == last_p4) {
+            for (int tries = 0; tries < 50; tries++) {
+                usleep(200);
+                if (reg_read_block(R_FROM_ARM_MSG, 8, blk)) break;
+                msg = blk[0]; st = blk[6]; outdoor = blk[7];
+                if (!(p[1] == last_p2 && p[3] == last_p4)) { stale_fixed++; break; }
+            }
+        }
 
         if ((msg & 0xff) == 0x40) {
             unsigned int addr = p[1] << 2;          /* p2 is a word address */
@@ -445,7 +528,14 @@ int main(int argc, char **argv) {
             /* Test for a header-before-payload race: valid TS headers wrapped
                around stale 0x10 fill suggest we read before the payload lands. */
             if (read_delay_us > 0) usleep((unsigned)read_delay_us);
-            if (nbytes && nbytes <= (1u << 20)) {
+            /* The ARM occasionally notifies the same fragment twice in a row
+               (same p2 and p4, not where the ring should continue). Acking both
+               copies is harmless - the stream carries on intact - but writing
+               both splices a repeat into the TS. So ack it, don't output it. */
+            int dup = (p[1] == last_p2 && p[3] == last_p4);
+            if (dup) { dups++; if (keep_dups) dup = 0; }
+            else { last_p2 = p[1]; last_p4 = p[3]; }
+            if (!dup && nbytes && nbytes <= (1u << 20)) {
                 unsigned int done = 0; int ok = 1;
                 while (done < nbytes) {
                     unsigned int n = nbytes - done;
@@ -456,9 +546,17 @@ int main(int argc, char **argv) {
                 }
                 if (!ok) short_reads++;
                 if (ok && done) {
-                    if (!f) f = fopen(outpath, "wb");
+                    /* On the wire the TS is 32-bit word-swapped (the driver reads
+                       with swap(1)); fragments are whole words, so swap in place. */
+                    if (ts_out)
+                        for (unsigned int k = 0; k + 3 < done; k += 4) {
+                            unsigned char t0b = buf[k], t1b = buf[k+1];
+                            buf[k] = buf[k+3]; buf[k+1] = buf[k+2];
+                            buf[k+2] = t1b; buf[k+3] = t0b;
+                        }
+                    if (!f) f = to_stdout ? data_out : fopen(outpath, "wb");
                     if (f) {
-                        if (!fidx) {
+                        if (!fidx && !to_stdout) {
                             char ip[1024];
                             snprintf(ip, sizeof ip, "%s.idx", outpath);
                             fidx = fopen(ip, "w");
@@ -467,7 +565,13 @@ int main(int argc, char **argv) {
                         if (fidx)
                             fprintf(fidx, "%ld %ld %u 0x%x 0x%x 0x%x 0x%x 0x%x\n",
                                     ms, total, done, p[0], p[1], p[2], p[3], p[4]);
-                        fwrite(buf, 1, done, f); total += done; frames++;
+                        if (fwrite(buf, 1, done, f) != done ||
+                            (to_stdout && fflush(f) != 0)) {
+                            fprintf(stderr, "\n  output closed (%s), stopping\n",
+                                    strerror(errno));
+                            stop_req = 1;
+                        }
+                        total += done; frames++;
                     }
                     if (frames == 1)
                         printf("    first buffer: p1(stream type) = 0x%02x  %s\n", p[0],
@@ -543,8 +647,9 @@ int main(int argc, char **argv) {
     gettimeofday(&now, NULL);
     long elapsed = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_usec - t0.tv_usec) / 1000;
     if (!elapsed) elapsed = 1;
-    printf("\n  %ld polls in %ld ms (%ld idle), %d fragments, %ld short reads\n",
-           polls, elapsed, idle, frames, short_reads);
+    printf("\n  %ld polls in %ld ms (%ld idle), %d fragments, %ld short reads, "
+           "%ld stale notifications re-read, %ld repeats skipped\n", polls, elapsed,
+           idle, frames, short_reads, stale_fixed, dups);
     printf("  %ld bytes in %ld ms = %.2f Mbps\n",
            total, elapsed, (double)total * 8.0 / (double)elapsed / 1000.0);
     if (f) fclose(f);

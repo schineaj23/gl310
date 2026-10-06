@@ -1,0 +1,16 @@
+#!/bin/sh
+# gl310live - bring the card up and stream live MPEG-TS (H.264 1080p30) to stdout.
+#
+#   tools/gl310live | ffplay -fflags nobuffer -flags low_delay -framedrop -
+#   tools/gl310live > session.ts
+#
+# 8 Mbps CBR by default (--rate KBPS to change). Diagnostics go to stderr. Ctrl-C (or closing the reader) stops the encoder and
+# reboots the firmware cleanly. Extra arguments go to gl310start, e.g. --rate 6000.
+set -e
+here=$(cd "$(dirname "$0")" && pwd)
+# The HDMI receiver init must be re-applied every session (RE.md), and it holds
+# the ARM in reset, so the firmware is booted after it.
+"$here/gl310i2c" --init --shift 0 --go >&2
+# gl310init finds the firmware as ../vendor/*.bin, relative to the cwd.
+(cd "$here" && ./gl310init --go) >&2
+exec "$here/gl310start" --go --watch 0 --out - "$@"
