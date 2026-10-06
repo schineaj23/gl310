@@ -38,11 +38,24 @@
  * exhausted the gadget stalls. The old loop spent ~30 round trips per fragment at
  * ~100 fragments/s - about 3000 commands/s against a 16-deep queue.
  *
- * So the fix is round-trip count, not overlap:
+ * So part of the fix is round-trip count:
  *   - one RegisterReadEx for the whole inbound block instead of eight reads
- *   - one RegisterWriteEx for the six ack params instead of six writes
- *   - no per-fragment printf, no sleeps, one pre-allocated buffer
- *   - nine transfers per fragment instead of about thirty
+ *   - no per-fragment printf, one pre-allocated buffer
+ *   - twelve transfers per fragment instead of about thirty
+ *
+ * The ack params stay as six single writes: op 0x03 RegisterWriteEx misplaces values
+ * on this device (see RE.md), so only the read side is batched.
+ *
+ * But round trips are not the whole story. Polling flat out with no idle sleep made
+ * the card produce NOTHING - 5381 polls/s and zero fragments - because the HCI thread
+ * never got scheduled. --idle-us (default 1000) exists for that.
+ *
+ * And the captured volume scales with poll rate, which means cmd 0x40 reports ring
+ * STATE rather than a queue of new data: at 366 polls/s the full-ring descriptor
+ * (p2=0x102f00, p4=0x5d00) repeated 115 times in 3 s and the implied rate was 72 Mbps
+ * against a configured 8 Mbps. Reassembly is therefore NOT solved; the host must tell
+ * the ARM how much it consumed, which is what CTask_CompleteArm's parameters carry
+ * from driver-side request bookkeeping (status, reqid), not a blind echo of p1..p5.
  *
  * The vendor driver throttles harder still: CTask_ProcessDataStreaming declines to
  * issue a DMA whenever rd_ready or wr_ready is clear, which in the captured session
@@ -219,11 +232,13 @@ static int prop(const char *label, unsigned int sel,
 
 
 int main(int argc, char **argv) {
-    int go = 0, stop = 0, watch_s = 5;
+    int go = 0, stop = 0, watch_s = 5, keep = 0, idle_us = 1000;
     const char *outpath = "gl310-capture.bin";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--go")) go = 1;
         else if (!strcmp(argv[i], "--stop")) stop = 1;
+        else if (!strcmp(argv[i], "--keep")) keep = 1;
+        else if (!strcmp(argv[i], "--idle-us") && i + 1 < argc) idle_us = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outpath = argv[++i];
@@ -311,9 +326,13 @@ int main(int argc, char **argv) {
         unsigned int blk[8];
         if (reg_read_block(R_FROM_ARM_MSG, 8, blk)) break;
         polls++;
-        unsigned int msg = blk[0], st = blk[6];
+        unsigned int msg = blk[0], st = blk[6], outdoor = blk[7];
         const unsigned int *p = &blk[1];
-        if (!(st & 1)) { idle++; continue; }
+        if (!(st & 1)) { idle++; usleep(idle_us); continue; }
+
+        /* blk[7] is 0x6cc: if our previous message is still pending, give the
+           ARM a moment rather than stacking another one on top of it. */
+        if (outdoor & 1) { usleep(idle_us); continue; }
 
         if ((msg & 0xff) == 0x40) {
             unsigned int addr = p[1] << 2;          /* p2 is a word address */
@@ -348,10 +367,20 @@ int main(int argc, char **argv) {
                 }
             }
             /* Return the buffer: CTask_CompleteArm sends code 0x30 echoing the
-               incoming parameters. Params are descending from 0x6f8, so ascending
-               from 0x6e4 the order is p6,p5,p4,p3,p2,p1 - one RegisterWriteEx. */
-            unsigned int ap[6] = { 1, p[4], p[3], p[2], p[1], p[0] };
-            if (reg_write_block(0x6e4, 6, ap)) break;
+               incoming parameters.
+
+               These are deliberately six single writes, not one RegisterWriteEx.
+               Op 0x03 does not behave the way CUsbCntl_RegisterWriteEx's own encoder
+               implies: writing five values from 0x6d0 put value[1] at 0x6d0,
+               value[2] at 0x6d4 and value[3] at 0x6d8, with value[0] and value[4]
+               landing nowhere visible. Until that is understood, only the read side
+               gets batched - RegisterReadEx is verified 1:1 against the known
+               mailbox layout, op 0x03 is not. */
+            unsigned int ap[6] = { p[0], p[1], p[2], p[3], p[4], 1 };
+            int bad = 0;
+            for (int i = 0; i < 6 && !bad; i++)
+                bad = reg_write(PARAM_REG[i], ap[i]);
+            if (bad) break;
             if (reg_write(R_TO_ARM_STATUS, 1u)) break;
             if (reg_write(R_TO_ARM_MSG, 0x30u)) break;
         }
@@ -410,6 +439,11 @@ int main(int argc, char **argv) {
        third wedge happened: gl310init's firmware download ran against an already
        poisoned gadget and hung. ResetArm is two OUT-only commands and gives QPSOS a
        clean gadget in about 8 ms, so there is no reason not to. */
+    if (keep) {
+        printf("--keep: leaving the firmware running so its log can be read.\n"
+               "  Reboot it yourself before the next heavy operation.\n");
+        goto out;
+    }
     printf("Rebooting the firmware to leave the gadget clean.\n");
     reset_arm(0);
     usleep(100000);

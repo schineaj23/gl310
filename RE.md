@@ -1005,9 +1005,16 @@ Fragment addresses chain exactly, and each frame's fragments sum to the compress
 buffer size — e.g. `0x5ce6 + 0x1a`, `0x22f + 0x5ad1`, `0xfb + 0x5c05`,
 `0x23f2 + 0x390e`, all `= 0x5d00` words = 95,232 bytes.
 
-**So the correct reassembly is simply every fragment, in arrival order.** Un-swap each
-32-bit word and the result is the transport stream. Verified against TS
-continuity counters on PID `0x44`:
+> **Correction — this section overclaimed.** "Every fragment in arrival order" fits the
+> one slow capture it was derived from, but it does **not** generalise, and the
+> reassembly is *not* solved. See
+> [§ What the faster loop revealed](#what-the-faster-loop-revealed) below. Treat the
+> continuity-counter result as evidence that each ring image is internally coherent,
+> not as proof that concatenation is correct.
+
+Provisionally, concatenating every fragment in arrival order and un-swapping each
+32-bit word yields a transport stream. Measured against TS continuity counters on
+PID `0x44`:
 
 ```
   step  0:      3   duplicate/stall
@@ -1072,6 +1079,57 @@ Beyond that, the asynchronous path is the architecture the vendor driver uses:
 `sync(0)` (versus `sync(1)` for the firmware verify), and completion is handled later
 in `CEncoderTask_ProcessIoComplete`. `libusb_submit_transfer` with several reads
 outstanding is the equivalent.
+
+### What the faster loop revealed
+
+Batching the read side and throttling the idle poll changed the picture, and not
+entirely in the direction expected. Three runs, same 3 s window:
+
+| idle poll | polls/s | fragments | bytes | implied rate |
+|-----------|---------|-----------|-------|--------------|
+| 8 ms sleep, unbatched | ~120 | 55 | 3.1 MB | 8.2 Mbps |
+| none (flat out) | 5381 | **0** | 0 | — |
+| 1 ms sleep, batched | ~366 | 455 | 27.1 MB | **72 Mbps** |
+
+Two things follow.
+
+**Polling flat out starves the firmware.** At 5381 polls/s the card produced *nothing*
+at all — the HCI thread never got a look in. There is a throttle requirement here, not
+just a round-trip budget.
+
+**The captured volume scales with how hard we poll, so the ring is being re-read.** In
+the 455-fragment run the descriptor `(p2 = 0x102f00, p4 = 0x5d00)` — base address, full
+ring size — appears **115 times**, while every other descriptor appears exactly once.
+The remaining 171 `p3=0`/`p3=1` pairs each sum to the whole ring again, so even after
+discarding the repeats the implied rate is ~43 Mbps against a configured 8 Mbps peak.
+
+The honest reading: **`cmd 0x40` reports ring *state*, not a queue of new data**, and the
+host is expected to tell the ARM how much it consumed. That is what
+`CTask_CompleteArm`'s parameters do, and blindly echoing the incoming `p1..p5` with a
+status of 1 is evidently not it — `CTask_CompleteArm` sources its six parameters from
+driver-side request bookkeeping (the log shows `status(0x1) reqid(951)`), and
+`CEncoderTask_ProcessArmMessage` tracks `dataType`, `#(n)` and `msg_id` per task.
+
+So the next step is decoding that bookkeeping properly, rather than tuning the poll
+loop. Until then the firmware reports its unhappiness plainly: every run ends with a
+few hundred `(E)Drop` lines and `(E)CODEC_ERR = c0009` / `= 9800b`, followed by
+`(T)ARC Rec Stop`.
+
+### `RegisterWriteEx` (op `0x03`) does not do what the driver implies
+
+`CUsbCntl_RegisterWriteEx` (`0x83f50`) builds `03 01 n:u16 reg:u32` followed by `n`
+values at offset 8, total length `8 + 4n` — and `RegisterReadEx` with the mirror layout
+is verified 1:1 against the known mailbox block. But writing five values from `0x6d0`
+on the live card produced:
+
+```
+0x6d0 <- value[1]    0x6d4 <- value[2]    0x6d8 <- value[3]
+value[0] and value[4] landed nowhere visible
+```
+
+Until that is understood, **batch reads but not writes.** `gl310start` uses six single
+`RegisterWrite`s for the ack parameters, which keeps the per-fragment cost at twelve
+transfers rather than nine — still well under the original thirty.
 
 ### Operational rule: reboot the firmware after every capture run
 
