@@ -6,13 +6,17 @@
 #
 # Needs the extension activated (macos/README.md) and ffmpeg. Ctrl-C stops it all;
 # gl310start then stops the encoder and reboots the card's firmware cleanly.
-# No -fflags nobuffer / -flags low_delay: with them VideoToolbox rejects the first
-# ~0.7 s of a live stream ("Error submitting packet"); without them it is clean.
+# Latency, measured by replaying a capture with its recorded timing:
+#   -threads 1         ffmpeg's frame threading held ~10 frames: 412 -> 79 ms
+#   -probesize 300000  the stream declares an audio PID that never carries data, so
+#   -analyzeduration 0 the default probe waited ~5 s before the first frame: -> 0.45 s
+# No -fflags nobuffer: with it VideoToolbox rejected the first ~0.7 s of a live stream.
 # Extra arguments go to gl310feed (e.g. --dry-run to test without the camera).
 here=$(cd "$(dirname "$0")" && pwd)
 feed="$here/../macos/build/gl310feed"
 [ -x "$feed" ] || { echo "build it first: macos/build.sh" >&2; exit 1; }
 "$here/gl310live" \
-  | ffmpeg -hide_banner -loglevel error -hwaccel videotoolbox -f mpegts -i - \
+  | ffmpeg -hide_banner -loglevel error -hwaccel videotoolbox \
+           -probesize 300000 -analyzeduration 0 -threads 1 -f mpegts -i - \
            -f rawvideo -pix_fmt nv12 - \
   | "$feed" "$@"
