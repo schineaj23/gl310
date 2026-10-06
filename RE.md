@@ -761,14 +761,155 @@ The one untested part is DDR training itself, because the card has stayed powere
 re-running it on a trained controller would risk the warm state for no gain. It should
 be exercised the first time the card is cold-booted, with `gl310log` watching.
 
+## The mailbox — decoded, and confirmed working
+
+> Earlier notes had `0x6cc` and `0x6fc` the wrong way round. The log format string in
+> `QPFWAPI_SendMessageToARM` settles it: **`0x6cc` is `REG_TO_ARM_MESSAGE_STATUS`,
+> `0x6fc` is `REG_TO_ARM_MESSAGE`.**
+
+### Registers
+
+Host → ARM:
+
+| register | role |
+|----------|------|
+| `0x6f8` `0x6f4` `0x6f0` `0x6ec` `0x6e8` `0x6e4` `0x6e0` `0x6dc` `0x6d8` | params 1..9, **descending** |
+| `0x6cc` | `REG_TO_ARM_MESSAGE_STATUS` = `(taskId << 16) \| (needAck << 8) \| 1` |
+| `0x6fc` | `REG_TO_ARM_MESSAGE` = `(taskId << 16) \| cmd` |
+
+ARM → host (read by the unnamed function at `0x5ab10`, which needs `this+0x25c == 2`):
+
+| register | role |
+|----------|------|
+| `0x6b0` | message word |
+| `0x6c8` | status word |
+| `0x6b4` `0x6b8` `0x6bc` `0x6c0` `0x6c4` | params 1..5 |
+
+### Sequence
+
+```
+1. MailboxReady: poll 0x6cc until bit 0 is clear        (0x5b020, 500 ms timeout)
+2. write params, 0x6f8 downwards
+3. write 0x6cc = (taskId<<16) | (needAck<<8) | 1        <- does NOT trigger
+4. write 0x6fc = (taskId<<16) | cmd                     <- THIS triggers the ARM
+```
+
+**Confirmed on hardware**, with `tools/gl310mbox.c`:
+
+```
+  0x6cc <- 0x00000001   (status, doorbell set)
+    0x6cc reads 0x00000001, doorbell=1  (status alone does not trigger)
+  0x6fc <- 0x00000004   (cmd 0x04, task 0)  <- this is the trigger
+    *** the ARM cleared the doorbell after 0 ms - it consumed the message
+```
+
+Step 3 and step 4 had to be separated to prove this. Writing only the status leaves
+bit 0 set indefinitely — verified by writing `0xabcd0001` and reading it back
+unchanged three times. Writing the message register makes the ARM consume it and
+**zero `0x6cc` entirely** (not just bit 0). So bit 0 of `0x6cc` is the busy flag, and
+`0x6fc` is the doorbell.
+
+Corroboration that the register roles are right: on first contact `0x6fc` read `0x0a`,
+i.e. `SetAudioInputVolume` — plausibly the last thing the Windows driver ever sent.
+
+`QPFWAPI_SendMessageToARM` also calls slot `+0xf8` with the constant 1 after writing
+both registers. Its purpose is still unidentified (it is the one accessor slot we
+cannot place), but it is evidently **not required** — the ARM consumes messages
+without it.
+
+### Command codes
+
+Recovered mechanically from the `QPFW*API_` wrappers: each builds its message word as
+`and eax, 0xffff0000` / `or eax, <code>`. Command `0x10` is a generic *set property*,
+with the property selector in param 1.
+
+| cmd | wrapper | params |
+|-----|---------|--------|
+| `0x01` | `StartEncoder` | none |
+| `0x02` | `StopEncoder` | p1, p2 |
+| `0x03` | `PauseEncoder` | none |
+| `0x04` | `ResumeEncoder` | none |
+| `0x07` | `GetViosdTableaddr` | p1, p2 |
+| `0x08` | `GetCurVidBufInfo` | p1 |
+| `0x0a` | `SetAudioInputVolume` | p1 |
+| `0x0c` | `InsertUserData` | p1 |
+| `0x10` | *set property* | p1 = selector, p2.. = value |
+| `0x11` | `SetEncMode` | p1, p2, p3 |
+| `0x12` | `GetAFrame` | none |
+| `0x81` | `StartDecoder` | p1..p6 |
+| `0x82` | `StopDecoder` | p1..p4 |
+| `0x86` | `Flush` | p1 |
+| `0x87` | `GetPlayInfo` | p1 |
+| `0x88` | `SetAudioOutputVolume` | p1 |
+| `0xb0` | `GetVouOsdMem` | p1, p2 |
+| `0xf1` | `SystemOpen` | p1 |
+| `0xf2` | `SystemLink` | p1 |
+| `0xf3` | `SystemClose` | none |
+
+Property selectors for command `0x10`:
+
+| sel | property | sel | property |
+|-----|----------|-----|----------|
+| `0x01` | IndexCapture | `0x0c` | MJPEGFrameBuffer |
+| `0x02` | ViuSyncCode | `0x0f` | ExternalTriggerToSync |
+| `0x03` | MP4VideoBlockNumber | `0x10` | PTSResetByTrigger |
+| `0x04` | AudioEnhancement (p2..p9) | `0x11` | RawVideoDecimation |
+| `0x05` | EnableVidPadding | `0x12` | DeinterlaceMode |
+| `0x07` | VBIInfo (p2..p6) | `0x13` | DeinterlaceMode (long form) |
+| `0x09` | FreezeVideo | `0x14` | LargeCompressBufferControl |
+| `0x0a` | StillVideoInput | | |
+| `0x0b` | MJPEGQuality | | |
+
+The ack direction (`QPFWAPI_AckARMMessage`, `0x5ae40`) fires only when bit 8 of the
+incoming message is set, and replies with code **`0x31`** when the incoming command is
+`< 0x80` (encoder) or **`0xa2`** when `>= 0x80` (decoder), echoing the incoming message's
+high 16 bits.
+
+### Encoder start, as the driver does it
+
+`CEncoderTask_Start` (`0x77cf0`):
+
+```
+CQLCodec_UpdateMiscConfig(codec, hTask)        (0x56e20)
+MailboxReady(codec, 500)                       takes the mailbox lock
+CQLCodec_UpdateEncoderConfig(codec, hTask, 0)  (0x577b0) - issues the property sets
+QPFWENCAPI_StartEncoder(codec, hTask)          cmd 0x01
+release the mailbox lock                       (0x5b130)
+```
+
+So `CQLCodec_UpdateEncoderConfig` is the remaining piece of real work: it is where the
+`0x10`/`0x11` property messages get their actual values.
+
+### I²C, resolved
+
+`tools/gl310probe --raw "0c 01 01 00 2a 00 00 00 1b" 2` still returns status `0x06`.
+The firmware says why, in its own string table:
+
+```
+i2c.c:QPSOSI2CTransfer: Software (GPIO) I2C not supported
+```
+
+So **op `0x0C` (SW-I²C) will never work on this build** — use op `0x08` (HW I²C),
+which answers. That closes a question that had been open since the first probe.
+
+### A caveat on `MemoryRead`
+
+Two op-`0x02` reads of the same address inside one USB session returned identical
+values for the firmware's tick counter even ~100 ms apart, while reads from separate
+invocations advanced correctly. Treat consecutive `MemoryRead`s of one address as
+possibly latched, and prefer DMA reads (`gl310life`) when a value must be fresh. The
+818 KB byte-exact firmware verify went through DMA, so that result is unaffected.
+
 ## Still to do
 
-The firmware is up, so the remaining work is the actual goal: get frames out.
+The firmware is up and takes commands, so the remaining work is the actual goal:
+get frames out.
 
-- **Decode the mailbox.** `QPFWAPI_SendMessageToARM` (`0x5a8c0`), `QPFWAPI_AckARMMessage`
-  (`0x5ae40`), and the ARM→host poll. Live now: `0x6c8 = 0`, `0x6cc = 0`,
-  `0x6f8 = 8`, `0x6fc = 0xa`, so the ARM is idle and posting nothing — expected,
-  since we have never asked it to do anything.
+- **`CQLCodec_UpdateEncoderConfig` (`0x577b0`)** — the property values for a given
+  mode. Then `StartEncoder` and watch for an ARM→host message on `0x6b0`/`0x6c8`.
+- **The frame path.** Per the log, the ARM posts `cmd 0x40` with p1 = stream type,
+  p2 = ARM address, p4 = length in words; the host DMA-reads that address with
+  `swap(1)` on EP `0x81`, then acks. `CTask_CompleteArm` (`0x725d0`) is the host side.
 - **Post-boot init.** `CQLCodecLib_InitDevice`, then the `CQLCodec_Set` properties
   for stream type/profile/level, then encoder start (`CEncoderTask_*`,
   `QPFWENCAPI_*`). Every one of these should now be visible in `gl310log --follow`.

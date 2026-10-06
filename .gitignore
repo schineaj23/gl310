@@ -6,6 +6,7 @@ tools/gl310armtest
 tools/gl310aperture
 tools/gl310life
 tools/gl310log
+tools/gl310mbox
 tools/__pycache__/
 *.o
 *.swp
