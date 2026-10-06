@@ -23,9 +23,17 @@
  * acks with message code 0x30. The driver reads with swap(1), so the bitstream may
  * need 32-bit byte swapping - we detect that by looking for H.264 start codes.
  *
- * Recovery from anything that goes wrong: --stop sends StopEncoder, and failing that
- * `gl310init --go` reboots QPSOS from the resident image in about 8 ms. There is no
- * flash on this board, so nothing here can persist.
+ * HAZARD, hit twice. The command channel has no framing and cannot resynchronise, so
+ * one short or abandoned bulk transfer stalls the firmware's whole USB gadget: every
+ * later transfer times out, on the OUT pipe as well, and neither draining, clear_halt,
+ * SET_INTERFACE nor a ResetArm toggle brings it back. Only a physical replug does.
+ * Both times it happened at shutdown, with StopEncoder landing while the ARM still had
+ * frames in flight and a payload left queued on EP 0x81.
+ *
+ * So this tool now drains EP 0x81 before starting, after any short read, and - most
+ * importantly - quiesces before stopping: keep acking and draining until the ARM stops
+ * posting, and only then send StopEncoder. That is a hypothesis about the cause, not
+ * yet a proven fix.
  *
  * Build:
  *   clang -O2 -o gl310start gl310start.c -I/opt/homebrew/include \
@@ -102,6 +110,20 @@ static int reg_write(unsigned int reg, unsigned int val) {
     unsigned char c[12]; hdr(c, 0x01, 0x01, 1, reg); put32(c+8, val);
     return cmd(c, 12, NULL, 0);
 }
+/* Pull and discard anything left sitting in the DMA-in pipe. The command channel
+   has no framing, so one short or abandoned bulk transfer desynchronises every
+   later transfer on the device - which is how this tool wedged the card twice. */
+static int drain_dma(void) {
+    static unsigned char junk[131072];
+    int n = 0, total = 0, rounds = 0;
+    while (rounds++ < 32) {
+        if (libusb_bulk_transfer(dev, EP_DMA_RD, junk, sizeof junk, &n, 50) || n == 0) break;
+        total += n;
+    }
+    if (total) printf("    drained %d stale byte(s) from the DMA-in pipe\n", total);
+    return total;
+}
+
 static int dma_read(unsigned int byteaddr, unsigned char *buf, int nbytes) {
     unsigned char c[16], st[1]; int n = 0, r;
     hdr(c, 0x09, 0x00, 8, 0);
@@ -112,6 +134,8 @@ static int dma_read(unsigned int byteaddr, unsigned char *buf, int nbytes) {
     if (r || n != nbytes) {
         fprintf(stderr, "    dma IN @0x%x: %s (%d/%d)\n",
                 byteaddr, libusb_error_name(r), n, nbytes);
+        /* a short read leaves the rest of the payload queued - take it out */
+        drain_dma();
         return -1;
     }
     return 0;
@@ -192,6 +216,7 @@ int main(int argc, char **argv) {
     }
 
     printf("Bringing up the encoder.\n\n");
+    drain_dma();
 
     unsigned int one[1];
     one[0] = 0x80000011;
@@ -224,6 +249,7 @@ int main(int argc, char **argv) {
     FILE *f = NULL;
     long total = 0;
     int frames = 0;
+    int max_frames = 240;
     for (int ms = 0; ms < watch_s * 1000; ms += 10) {
         unsigned int st = 0, msg = 0;
         if (reg_read(R_FROM_ARM_STAT, &st)) break;
@@ -235,7 +261,7 @@ int main(int argc, char **argv) {
                "p1=0x%x p2=0x%x p3=0x%x p4=0x%x p5=0x%x\n",
                ms, st, msg, msg & 0xff, p[0], p[1], p[2], p[3], p[4]);
 
-        if ((msg & 0xff) == 0x40) {
+        if ((msg & 0xff) == 0x40 && frames < max_frames) {
             unsigned int addr = p[1] << 2;          /* p2 is a word address  */
             unsigned int nbytes = p[3] * 4;         /* p4 is a word count    */
             if (nbytes && nbytes < (32u << 20)) {
@@ -265,10 +291,12 @@ int main(int argc, char **argv) {
             unsigned int ap[6] = { p[0], p[1], p[2], p[3], p[4], 1 };
             send_msg("  complete", 0x30, 0, ap, 6);
         }
-        /* QPFWAPI_AckARMMessage finishes by writing the inbound status word back
-           to 0x6c8. That is what frees the ARM to post the next message; without
-           it the same descriptor is re-posted forever. */
-        reg_write(R_FROM_ARM_STAT, st);
+        /* QPFWAPI_AckARMMessage (0x5afca) clears bit 0 of the inbound status word
+           and writes it back to 0x6c8. Bit 0 is the inbound busy flag, exactly
+           mirroring bit 0 of 0x6cc in the other direction. Writing the word back
+           unmodified does nothing, which is why the ARM re-posted one descriptor
+           forever. */
+        reg_write(R_FROM_ARM_STAT, st & ~1u);
         usleep(2000);
     }
     if (f) fclose(f);
@@ -281,9 +309,32 @@ int main(int argc, char **argv) {
                "no valid signal on the HDMI input, since the ADV7441 receiver is\n"
                "configured by the host over I2C and we have not done that yet.\n");
 
-    printf("\nSending StopEncoder to leave the card idle.\n");
+    /* Shutting down is where this wedged the card twice: StopEncoder lands while
+       the ARM still has frames in flight, so a payload stays queued on EP 0x81 and
+       the whole gadget stalls. Quiesce first - keep acking and draining until the
+       ARM stops posting - and only then stop the encoder. */
+    printf("\nQuiescing: draining in-flight frames before StopEncoder.\n");
+    for (int i = 0; i < 100; i++) {
+        unsigned int st = 0;
+        if (reg_read(R_FROM_ARM_STAT, &st)) break;
+        drain_dma();
+        if (!(st & 1)) { usleep(20000); continue; }
+        reg_write(R_FROM_ARM_STAT, st & ~1u);
+        usleep(10000);
+    }
+    drain_dma();
+
+    printf("Sending StopEncoder.\n");
     unsigned int sp[2] = { 0, 0 };
     send_msg("StopEncoder", 0x02, 0, sp, 2);
+    for (int i = 0; i < 40; i++) {
+        unsigned int st = 0;
+        if (reg_read(R_FROM_ARM_STAT, &st)) break;
+        if (st & 1) { drain_dma(); reg_write(R_FROM_ARM_STAT, st & ~1u); }
+        usleep(25000);
+    }
+    drain_dma();
+    printf("Card left idle.\n");
 out:
     libusb_release_interface(dev, 0); libusb_close(dev); libusb_exit(NULL);
     return 0;
