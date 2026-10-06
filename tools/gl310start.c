@@ -238,6 +238,7 @@ int main(int argc, char **argv) {
     int capmode = -1;       /* QPFWENCAPI_SetEncMode, cmd 0x11 */
     int rawfmt = -1;        /* SetRawVideoDecimation output_format, sel 0x11 */
     unsigned int ringdump = 0, ringlen = 0;
+    long bitrate = -1;   /* VBRBitRate 0x6e8: hi16 peak, lo16 avg, both kbps */
     const char *outpath = "gl310-capture.bin";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--go")) go = 1;
@@ -251,6 +252,8 @@ int main(int argc, char **argv) {
             capmode = (int)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--raw-format") && i + 1 < argc)
             rawfmt = (int)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--bitrate") && i + 1 < argc)
+            bitrate = strtol(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--ring-dump") && i + 2 < argc) {
             ringdump = (unsigned)strtoul(argv[++i], 0, 0);
             ringlen  = (unsigned)strtoul(argv[++i], 0, 0);
@@ -323,6 +326,16 @@ int main(int argc, char **argv) {
         /* SystemControl packs: bits 0-2 stream type, 3-7 stream data, 8-11 profile,
            12-15 level. 0x2101c219 = type 1, data 3, profile 2, level 12, matching the
            log's "stream type(1) stream data(3) profile(2) level(12)". */
+        /* VBRBitRate: 0x1f4007d0 = 8000 peak / 2000 avg kbps. Lowering it makes the
+           ~95 KB compressed ring take proportionally longer to fill, which is the
+           point: the ring wraps in ~86 ms at 9 Mbps and the ARM's first notification
+           arrives at ~88 ms, so the opening bytes of the stream - where SPS and PPS
+           live - are overwritten before we ever see them. */
+        if (CONFIG[i].reg == 0x6e8 && bitrate >= 0) {
+            v = (unsigned)bitrate;
+            printf("    VBRBitRate -> 0x%08x (%u peak / %u avg kbps)\n",
+                   v, v >> 16, v & 0xffff);
+        }
         if (CONFIG[i].reg == 0x6f8 && stream_type >= 0) {
             v = (v & ~7u) | ((unsigned)stream_type & 7u);
             printf("    stream type -> %d  (0x%08x)\n", stream_type, v);

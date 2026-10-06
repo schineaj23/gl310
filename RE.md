@@ -1911,3 +1911,62 @@ them from its own configuration. Options, cheapest first:
 3. Keep looking for a "repeat sequence header" property.
 
 With the parameter sets prepended, this stream should decode as-is.
+
+## What the vendor applications tell us
+
+`vendor/LGPLite_Stream_Engine_V1.3.0.16_*.exe` (NSIS, extract with `7z x`) and
+`vendor/RECentral_1.3.0.121.zip` (loose DLLs, not buried in the MSIs).
+
+### Stream Engine uses the H.264/TS path, not the raw path
+
+This matters because it validates the whole approach. The GL310-specific components are
+
+```
+Filter/AVerMedia LGPLite/avmC835devicecontrol_X64.dll
+Filter/AVerMedia LGPLite/avmC835virtualvideocapture_X64.ax
+Filter/AVerMedia LGPLite/avmC835virtualaudiocapture_X64.ax
+```
+
+and the device-control DLL contains the strings **`C:\AVerDump.ts`** and
+`..\AVerDump.ts`, plus classes `CAVerCapDeviceC835` / `C875` / `C985` and the build
+path `D:\Working_space\AP Team\StreamEngine_V1\VirtualFilter\C835VirtualCapture\...`.
+A `.ts` dump path means it consumes a transport stream — the same thing we capture.
+
+Searching every Stream Engine binary for `RawOutput` / `RawVideo` / `DisableRawOutput`
+finds **nothing**. So the webcam path is *not* the raw YUV path; it decodes H.264.
+`avmC835virtualvideocapture_X64.ax` only advertises YUY2 and RGB variants and contains
+no H.264 code, so the decode happens upstream (`Filter/X64/avmdcm.dll`, 5.4 MB, whose
+strings identify no third-party codec).
+
+RECentral ships `Components/DeviceAPI/C875Device.dll` and no `C835Device.dll` — matching
+the `ProjectC875` seen throughout our driver log, so the GL310 is handled by the C875
+project there.
+
+**Conclusion: decoding the H.264 TS is what the vendor's own webcam does.** Chasing the
+raw path is optional, not required.
+
+### Still no parameter sets
+
+- The **PMT carries no descriptors at all** (`program_info_length = 0`,
+  `ES_info_length = 0` for both streams), so there are no out-of-band parameter sets in
+  the transport stream.
+- Neither vendor binary contains a plausible pre-built SPS. The `00 00 00 01 67` hits in
+  `AVer330USB.sys` are inside a lookup table; the two-byte `67 4d` style hits in the
+  Stream Engine binaries are at chance frequency for 15 MB of compressed data.
+- A capture at a deliberately lowered `VBRBitRate` found one `00 00 01 27` candidate,
+  but its `profile_idc` is `0x03`, which is not a valid H.264 profile — a false
+  positive inside slice data.
+- **`VBRBitRate` (register `0x6e8`) does not change the output rate.** Setting it to
+  500/200 kbps still produced 15.5 Mbps, so effective rate control lives elsewhere.
+  That also kills the idea of slowing the ring fill to catch the stream opening.
+
+### The cheap way to settle it
+
+`C:\AVerDump.ts` is a debug dump built into the Stream Engine's device-control DLL. If
+it can be triggered on the Windows machine, it gives **ground truth**: either the
+driver's transport stream contains SPS/PPS and our configuration differs from the
+vendor's, or it does not and the decoder is given the parameters some other way.
+
+Failing that, recording a few seconds in RECentral and extracting the SPS/PPS from the
+resulting file works just as well — they depend only on the encoder configuration,
+which we reproduce byte for byte.
