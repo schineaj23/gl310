@@ -237,6 +237,7 @@ int main(int argc, char **argv) {
     int vout = -1;          /* SystemLink video_output nibble, bits 8-11 */
     int capmode = -1;       /* QPFWENCAPI_SetEncMode, cmd 0x11 */
     int rawfmt = -1;        /* SetRawVideoDecimation output_format, sel 0x11 */
+    unsigned int ringdump = 0, ringlen = 0;
     const char *outpath = "gl310-capture.bin";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--go")) go = 1;
@@ -250,6 +251,10 @@ int main(int argc, char **argv) {
             capmode = (int)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--raw-format") && i + 1 < argc)
             rawfmt = (int)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--ring-dump") && i + 2 < argc) {
+            ringdump = (unsigned)strtoul(argv[++i], 0, 0);
+            ringlen  = (unsigned)strtoul(argv[++i], 0, 0);
+        }
         else if (!strcmp(argv[i], "--idle-us") && i + 1 < argc) idle_us = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch_s = atoi(argv[++i]);
@@ -328,6 +333,36 @@ int main(int argc, char **argv) {
 
     printf("\n");
     if (send_msg("StartEncoder", 0x01, 0, NULL, 0)) goto out;
+
+    if (ringdump) {
+        /* Take the notification/ack/reassembly logic completely out of the loop:
+           let the encoder run, then DMA-read one contiguous span of its ring and
+           look at those bytes directly. If the ring holds a clean transport stream,
+           the bug is in our reassembly; if it holds the same mess, it is the
+           encoder output itself. */
+        printf("\nRing dump: letting the encoder run 500 ms, then reading "
+               "0x%06x..0x%06x in one contiguous span\n",
+               ringdump, ringdump + ringlen);
+        usleep(500000);
+        unsigned char *rb = malloc(ringlen);
+        if (rb) {
+            unsigned int done = 0; int ok = 1;
+            while (done < ringlen) {
+                unsigned int n = ringlen - done;
+                if (n > 131072) n = 131072;
+                n &= ~3u; if (!n) break;
+                if (dma_read(ringdump + done, rb + done, (int)n)) { ok = 0; break; }
+                done += n;
+            }
+            if (ok) {
+                FILE *rf = fopen(outpath, "wb");
+                if (rf) { fwrite(rb, 1, done, rf); fclose(rf); }
+                printf("  wrote %u contiguous bytes to %s\n", done, outpath);
+            } else printf("  ring read failed\n");
+            free(rb);
+        }
+        goto quiesce;
+    }
 
     printf("\nWatching for frames for %d s (ARM posts cmd 0x40 on 0x6b0) ...\n", watch_s);
     FILE *f = NULL, *fidx = NULL;
@@ -468,6 +503,7 @@ int main(int argc, char **argv) {
                "no valid signal on the HDMI input, since the ADV7441 receiver is\n"
                "configured by the host over I2C and we have not done that yet.\n");
 
+quiesce:
     /* Shutting down is where this wedged the card twice: StopEncoder lands while
        the ARM still has frames in flight, so a payload stays queued on EP 0x81 and
        the whole gadget stalls. Quiesce first - keep acking and draining until the

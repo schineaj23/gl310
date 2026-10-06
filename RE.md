@@ -1846,3 +1846,68 @@ matching the host side, where `CDevice::allocateRawVideoOuputTask` creates a dis
 tagged `p1 = 0x80`. `CYUVInChannel_GetBuffer` / `CYUVInChannel_CompleteBuffer` are the
 host-side counterparts to the `cmd 0x40` / `cmd 0x30` pair we already drive for the
 compressed task.
+
+## What was actually wrong with the H.264 — it is one missing piece
+
+Took the reassembly logic out of the loop entirely (`gl310start --ring-dump ADDR LEN`
+reads one contiguous span of the encoder's ring with no notifications, acks or
+fragment joining) and analysed a single internally-consistent fragment.
+
+**The stream is structurally valid.** From one 95,128-byte fragment:
+
+```
+TS sync            505/505 packets
+PID 0x44 payload   92,728 bytes, 1 PES start
+payload head       00 00 01 e0 | 00 00 | 80 c0 0a | PTS | DTS      <- valid PES header
+                   00 00 00 01 09 10                               <- valid AUD NAL
+                   3f f7 26 6e ...                                 <- slice data
+```
+
+Across 528 fragments in 2 s: **113 AUDs** (≈ one per field, exactly right for
+1080i59.94), 186 non-IDR slices, 1 IDR, 4 SEI. PTS/DTS present and incrementing by
+3003 ticks at 90 kHz = 29.97 fps.
+
+**The only thing missing is the parameter sets.** Scanning every fragment of a 2 s and
+then an 8 s capture: **SPS count 0.** Without an SPS a decoder cannot learn the
+resolution or profile, so `ffmpeg` reports `dimensions not set` and decodes nothing —
+not because the data is bad, but because it is missing the key to read it.
+
+### Correcting my own earlier diagnosis
+
+My "the payload is garbled" conclusion was substantially an analysis error:
+
+- **A slice NAL is one long run with no internal start codes** — emulation prevention
+  guarantees it. So 92 KB with no start codes after an AUD is *correct structure*, not
+  corruption. I read normal H.264 as damage.
+- My NAL scans ran over *concatenated* fragments and mid-slice data, so they found
+  `00 00 01` by chance and reported nonsense NAL types (2, 3, 4, 16, 24 …). Those were
+  artefacts of the scan, not of the stream.
+
+The one real signal in the earlier data was the pre-receiver-init capture being 27 %
+zero bytes with entropy 5.4 — that genuinely was an empty stream, and the receiver init
+genuinely fixed it.
+
+### Encryption is ruled out
+
+`transport_scrambling_control` is `0` on every packet, and the PES flags byte `0x80`
+has `PES_scrambling_control = 00`. Both layers declare the content unscrambled, and the
+content decodes as valid PES/NAL structure, which encrypted data would not.
+
+### Where the parameter sets have to come from
+
+Not the firmware (`qpvidfwusb.bin` contains no Annex-B parameter sets) and not the
+driver (the two `00 00 00 01 67` hits in `AVer330USB.sys` are false positives inside a
+lookup table — the surrounding bytes are a regular `00 00 00 NN 67 00 00 XX` pattern).
+No `QPFWENCAPI_*` property for repeating or inserting headers was found.
+
+So the encoder appears simply never to emit them, and the Windows application supplies
+them from its own configuration. Options, cheapest first:
+
+1. **Record once on the Windows machine** with the vendor software and lift the exact
+   SPS/PPS out of the resulting file. They depend only on the encoder configuration,
+   which we reproduce byte for byte, so one capture serves forever.
+2. Synthesise them from what we know (1920x1080, Main profile, level 4.0, interlaced,
+   29.97 fps). Workable but must match the slice headers exactly.
+3. Keep looking for a "repeat sequence header" property.
+
+With the parameter sets prepended, this stream should decode as-is.
