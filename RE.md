@@ -1041,11 +1041,48 @@ once that pool is exhausted the gadget stalls, and a stalled gadget is exactly w
 saw. The two symptoms have one cause: a synchronous, one-transfer-at-a-time host loop
 against an 8 Mbps stream.
 
-The fix is the architecture the vendor driver already uses: **asynchronous, pipelined
-transfers**. `CUsbCntl_StartDMARead` calls `QPUsbInterface_UsbAsyncIo`, and
-`CQLCodec_StartDMARead` is invoked with `sync(0)` for frames (versus `sync(1)` for the
-firmware verify), with completion handled later in `CEncoderTask_ProcessIoComplete`.
-`libusb_submit_transfer` with several reads outstanding is the equivalent.
+**What the pool actually is.** At boot QPSOS logs `enqueue req 1 to ep4out` through
+`req 16` — sixteen request buffers on `ep4out`, which is our **command** pipe `0x04`,
+drained by its HCI thread. So the limit is on **command round trips, not data rate**.
+The original loop spent about thirty round trips per fragment at ~100 fragments/s,
+roughly 3000 commands/s against a 16-deep queue.
+
+So the first fix is round-trip count, not overlap, and it needs no async machinery:
+
+| per fragment | before | after |
+|--------------|--------|-------|
+| collect the notification | 8 register reads | **1** `RegisterReadEx(0x6b0, 8)` |
+| ack params | 6 register writes | **1** `RegisterWriteEx(0x6e4, 6)` |
+| doorbells + status clear | 3 writes | 3 writes |
+| DMA command + payload | 2 | 2 |
+| per-fragment `printf`, 8 ms sleep | yes | none |
+| **total** | **~30** | **9** |
+
+The whole inbound mailbox is eight *consecutive* registers (`0x6b0` message, `0x6b4`–`0x6c4`
+params, `0x6c8` inbound status, `0x6cc` outbound doorbell), so one `RegisterReadEx`
+replaces eight transfers. Confirmed on the card.
+
+The vendor driver throttles harder still, and this is worth copying: in the captured
+session `CTask_ProcessDataStreaming` logged `rd_ready(0) wr_ready(0)` in **1203 of 3653**
+calls — a third of the time it declines to issue a DMA at all. It only moves data when
+both the ARM has something ready and a host buffer is free.
+
+Beyond that, the asynchronous path is the architecture the vendor driver uses:
+`CUsbCntl_StartDMARead` calls `QPUsbInterface_UsbAsyncIo`, frames are read with
+`sync(0)` (versus `sync(1)` for the firmware verify), and completion is handled later
+in `CEncoderTask_ProcessIoComplete`. `libusb_submit_transfer` with several reads
+outstanding is the equivalent.
+
+### Operational rule: reboot the firmware after every capture run
+
+A capture run leaves the gadget degraded even when it still answers — `gl310log` fills
+with `(E)Drop` and `can't get sysmsg` — and **the next heavy operation then wedges it
+for good.** The third wedge was exactly that: `gl310init --go`'s firmware download run
+against an already poisoned gadget, which hung mid-download.
+
+`ResetArm` is two OUT-only commands and gives QPSOS a clean gadget in 8 ms, so
+`gl310start` now always does it on the way out. Re-download the firmware with
+`gl310init --go` before the next capture.
 
 Note also that `swap` is not host-side software byte swapping: `CQLCodec_StartDMARead`
 turns `swap != 0` into a mode value of 3 passed down to the DMA engine, and

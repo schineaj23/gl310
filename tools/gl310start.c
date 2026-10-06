@@ -23,17 +23,36 @@
  * acks with message code 0x30. The driver reads with swap(1), so the bitstream may
  * need 32-bit byte swapping - we detect that by looking for H.264 start codes.
  *
- * HAZARD, hit twice. The command channel has no framing and cannot resynchronise, so
- * one short or abandoned bulk transfer stalls the firmware's whole USB gadget: every
- * later transfer times out, on the OUT pipe as well, and neither draining, clear_halt,
- * SET_INTERFACE nor a ResetArm toggle brings it back. Only a physical replug does.
- * Both times it happened at shutdown, with StopEncoder landing while the ARM still had
- * frames in flight and a payload left queued on EP 0x81.
+ * HAZARD, hit three times: the firmware's USB gadget can be driven into a stall from
+ * which nothing in user space recovers - every transfer times out, OUT pipe included,
+ * and draining, clear_halt, SET_INTERFACE and a ResetArm toggle all fail. Only a
+ * physical replug fixes it.
  *
- * So this tool now drains EP 0x81 before starting, after any short read, and - most
- * importantly - quiesces before stopping: keep acking and draining until the ARM stops
- * posting, and only then send StopEncoder. That is a hypothesis about the cause, not
- * yet a proven fix.
+ * The firmware says what is happening, in its own log:
+ *
+ *      (E)Drop
+ *      (W)can't get sysmsg in dwc_otg_pcd_handle_in_ep_intr
+ *
+ * QPSOS enqueues 16 request buffers on ep4out (our command pipe) at boot and drains
+ * them from its HCI thread. Flooding it with commands exhausts that pool, and once
+ * exhausted the gadget stalls. The old loop spent ~30 round trips per fragment at
+ * ~100 fragments/s - about 3000 commands/s against a 16-deep queue.
+ *
+ * So the fix is round-trip count, not overlap:
+ *   - one RegisterReadEx for the whole inbound block instead of eight reads
+ *   - one RegisterWriteEx for the six ack params instead of six writes
+ *   - no per-fragment printf, no sleeps, one pre-allocated buffer
+ *   - nine transfers per fragment instead of about thirty
+ *
+ * The vendor driver throttles harder still: CTask_ProcessDataStreaming declines to
+ * issue a DMA whenever rd_ready or wr_ready is clear, which in the captured session
+ * was 1203 of 3653 calls - a third of the time it does nothing at all.
+ *
+ * Two operational rules fall out, both now enforced below:
+ *   - quiesce before StopEncoder: keep acking and draining until the ARM stops posting
+ *   - reboot the firmware when done, because a capture run leaves the gadget degraded
+ *     and the next heavy operation wedges it. The third wedge was exactly that:
+ *     gl310init's firmware download against an already poisoned gadget.
  *
  * Build:
  *   clang -O2 -o gl310start gl310start.c -I/opt/homebrew/include \
@@ -43,6 +62,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <libusb-1.0/libusb.h>
 
 #define VID 0x07ca
@@ -60,7 +80,6 @@
 
 static const unsigned int PARAM_REG[9] =
     { 0x6f8, 0x6f4, 0x6f0, 0x6ec, 0x6e8, 0x6e4, 0x6e0, 0x6dc, 0x6d8 };
-static const unsigned int FROM_ARM_PARAM[5] = { 0x6b4, 0x6b8, 0x6bc, 0x6c0, 0x6c4 };
 
 /* The encoder config block, verbatim from the working session. */
 struct cfg { unsigned int reg, val; const char *what; };
@@ -110,6 +129,25 @@ static int reg_write(unsigned int reg, unsigned int val) {
     unsigned char c[12]; hdr(c, 0x01, 0x01, 1, reg); put32(c+8, val);
     return cmd(c, 12, NULL, 0);
 }
+/* RegisterReadEx: one command, n consecutive registers, 4*n bytes back. The whole
+   inbound mailbox - message, p1..p5, status and the outbound doorbell - is eight
+   consecutive registers from 0x6b0, so one transfer replaces eight. */
+static int reg_read_block(unsigned int start, int n, unsigned int *out) {
+    unsigned char c[8], r[128];
+    if (n < 1 || n > 32) return -1;
+    hdr(c, 0x01, 0x00, (unsigned short)n, start);
+    if (cmd(c, 8, r, 4 * n) != 4 * n) return -1;
+    for (int i = 0; i < n; i++) out[i] = get32(r + 4 * i);
+    return 0;
+}
+/* RegisterWriteEx (op 0x03): n consecutive registers in one command, ascending. */
+static int reg_write_block(unsigned int start, int n, const unsigned int *vals) {
+    unsigned char c[8 + 32 * 4];
+    if (n < 1 || n > 32) return -1;
+    hdr(c, 0x03, 0x01, (unsigned short)n, start);
+    for (int i = 0; i < n; i++) put32(c + 8 + 4 * i, vals[i]);
+    return cmd(c, 8 + 4 * n, NULL, 0);
+}
 /* Pull and discard anything left sitting in the DMA-in pipe. The command channel
    has no framing, so one short or abandoned bulk transfer desynchronises every
    later transfer on the device - which is how this tool wedged the card twice. */
@@ -139,6 +177,10 @@ static int dma_read(unsigned int byteaddr, unsigned char *buf, int nbytes) {
         return -1;
     }
     return 0;
+}
+
+static int reset_arm(int run) {
+    unsigned char c[8]; hdr(c, 0x07, run ? 1 : 0, 0, 0); return cmd(c, 8, NULL, 0);
 }
 
 /* Poll bit 0 of 0x6cc until the ARM clears it. */
@@ -175,14 +217,6 @@ static int prop(const char *label, unsigned int sel,
     return send_msg(label, 0x10, 0, p, n + 1);
 }
 
-/* How many 4-byte-swapped vs straight H.264 start codes does this buffer hold? */
-static void scan_h264(const unsigned char *buf, int len, int *plain, int *swapped) {
-    *plain = *swapped = 0;
-    for (int i = 0; i + 4 <= len; i++) {
-        if (buf[i]==0 && buf[i+1]==0 && buf[i+2]==0 && buf[i+3]==1) (*plain)++;
-        if (buf[i]==1 && buf[i+1]==0 && buf[i+2]==0 && buf[i+3]==0) (*swapped)++;
-    }
-}
 
 int main(int argc, char **argv) {
     int go = 0, stop = 0, watch_s = 5;
@@ -249,70 +283,90 @@ int main(int argc, char **argv) {
     FILE *f = NULL, *fidx = NULL;
     long total = 0;
     int frames = 0;
-    int max_frames = 90;
-    for (int ms = 0; ms < watch_s * 1000; ms += 10) {
-        unsigned int st = 0, msg = 0;
-        if (reg_read(R_FROM_ARM_STAT, &st)) break;
-        if (!(st & 1)) { usleep(10000); continue; }
-        if (reg_read(R_FROM_ARM_MSG, &msg)) break;
-        unsigned int p[5] = {0};
-        for (int i = 0; i < 5; i++) reg_read(FROM_ARM_PARAM[i], &p[i]);
-        printf("  [%5d ms] status=0x%08x msg=0x%08x cmd=0x%02x  "
-               "p1=0x%x p2=0x%x p3=0x%x p4=0x%x p5=0x%x\n",
-               ms, st, msg, msg & 0xff, p[0], p[1], p[2], p[3], p[4]);
+    int max_frames = 4000;
+    /* The loop below is written for round-trip count, because that is what the
+       firmware's (E)Drop / "can't get sysmsg" warnings are really complaining about.
+       The old version spent ~30 USB round trips per fragment: eight register reads to
+       collect the notification, eight writes to ack it, a terminal printf, and an
+       8 ms sleep. At ~100 fragments/s against an 8 Mbps stream that cannot keep up,
+       so the firmware's gadget message pool empties and frames are dropped.
 
-        if ((msg & 0xff) == 0x40 && frames < max_frames) {
-            unsigned int addr = p[1] << 2;          /* p2 is a word address  */
-            unsigned int nbytes = p[3] * 4;         /* p4 is a word count    */
-            if (nbytes && nbytes < (32u << 20)) {
-                unsigned char *buf = malloc(nbytes);
-                if (buf) {
-                    unsigned int done = 0; int ok = 1;
-                    while (done < nbytes) {
-                        unsigned int n = nbytes - done;
-                        if (n > 131072) n = 131072;
-                        n &= ~3u; if (!n) break;
-                        if (dma_read(addr + done, buf + done, (int)n)) { ok = 0; break; }
-                        done += n;
-                    }
-                    if (ok && done) {
-                        int pl, sw; scan_h264(buf, (int)done, &pl, &sw);
-                        printf("           read %u bytes from 0x%06x   "
-                               "H.264 start codes: %d plain, %d byte-swapped\n",
-                               done, addr, pl, sw);
-                        if (!f) f = fopen(outpath, "wb");
-                        if (f) {
-                            /* Record what each byte range in the capture came from, so
-                               reassembly can be worked out offline instead of guessed
-                               at while holding the card open. */
-                            if (!fidx) {
-                                char ip[1024];
-                                snprintf(ip, sizeof ip, "%s.idx", outpath);
-                                fidx = fopen(ip, "w");
-                                if (fidx) fprintf(fidx, "# ms offset len p1 p2 p3 p4 p5\n");
-                            }
-                            if (fidx)
-                                fprintf(fidx, "%d %ld %u 0x%x 0x%x 0x%x 0x%x 0x%x\n",
-                                        ms, total, done, p[0], p[1], p[2], p[3], p[4]);
-                            fwrite(buf, 1, done, f); total += done; frames++;
+       Batched, it is nine transfers: one RegisterReadEx for the whole inbound block,
+       the DMA command and its payload, one RegisterWriteEx for the six ack params,
+       two doorbell writes and one status clear. No sleeps, no per-fragment printing,
+       one pre-allocated buffer. */
+    unsigned char *buf = malloc(1u << 20);
+    if (!buf) { fprintf(stderr, "out of memory\n"); goto out; }
+
+    struct timeval t0, now;
+    gettimeofday(&t0, NULL);
+    long polls = 0, short_reads = 0, idle = 0;
+
+    for (;;) {
+        gettimeofday(&now, NULL);
+        long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_usec - t0.tv_usec) / 1000;
+        if (ms >= (long)watch_s * 1000 || frames >= max_frames) break;
+
+        /* 0x6b0..0x6cc: msg, p1..p5, inbound status, outbound doorbell - one transfer */
+        unsigned int blk[8];
+        if (reg_read_block(R_FROM_ARM_MSG, 8, blk)) break;
+        polls++;
+        unsigned int msg = blk[0], st = blk[6];
+        const unsigned int *p = &blk[1];
+        if (!(st & 1)) { idle++; continue; }
+
+        if ((msg & 0xff) == 0x40) {
+            unsigned int addr = p[1] << 2;          /* p2 is a word address */
+            unsigned int nbytes = p[3] * 4;         /* p4 is a word count   */
+            if (nbytes && nbytes <= (1u << 20)) {
+                unsigned int done = 0; int ok = 1;
+                while (done < nbytes) {
+                    unsigned int n = nbytes - done;
+                    if (n > 131072) n = 131072;
+                    n &= ~3u; if (!n) break;
+                    if (dma_read(addr + done, buf + done, (int)n)) { ok = 0; break; }
+                    done += n;
+                }
+                if (!ok) short_reads++;
+                if (ok && done) {
+                    if (!f) f = fopen(outpath, "wb");
+                    if (f) {
+                        if (!fidx) {
+                            char ip[1024];
+                            snprintf(ip, sizeof ip, "%s.idx", outpath);
+                            fidx = fopen(ip, "w");
+                            if (fidx) fprintf(fidx, "# ms offset len p1 p2 p3 p4 p5\n");
                         }
+                        if (fidx)
+                            fprintf(fidx, "%ld %ld %u 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+                                    ms, total, done, p[0], p[1], p[2], p[3], p[4]);
+                        fwrite(buf, 1, done, f); total += done; frames++;
                     }
-                    free(buf);
+                    if (verbose)
+                        printf("  [%5ld ms] cmd 0x%02x  addr 0x%06x  %u B  last=%u\n",
+                               ms, msg & 0xff, addr, done, p[2]);
                 }
             }
-            /* Return the buffer: CTask_CompleteArm sends message code 0x30
-               echoing the incoming parameters. */
-            unsigned int ap[6] = { p[0], p[1], p[2], p[3], p[4], 1 };
-            send_msg("  complete", 0x30, 0, ap, 6);
+            /* Return the buffer: CTask_CompleteArm sends code 0x30 echoing the
+               incoming parameters. Params are descending from 0x6f8, so ascending
+               from 0x6e4 the order is p6,p5,p4,p3,p2,p1 - one RegisterWriteEx. */
+            unsigned int ap[6] = { 1, p[4], p[3], p[2], p[1], p[0] };
+            if (reg_write_block(0x6e4, 6, ap)) break;
+            if (reg_write(R_TO_ARM_STATUS, 1u)) break;
+            if (reg_write(R_TO_ARM_MSG, 0x30u)) break;
         }
-        /* QPFWAPI_AckARMMessage (0x5afca) clears bit 0 of the inbound status word
-           and writes it back to 0x6c8. Bit 0 is the inbound busy flag, exactly
-           mirroring bit 0 of 0x6cc in the other direction. Writing the word back
-           unmodified does nothing, which is why the ARM re-posted one descriptor
-           forever. */
-        reg_write(R_FROM_ARM_STAT, st & ~1u);
-        usleep(8000);   /* gentler than the driver needs, but far gentler than before */
+        /* AckARMMessage (0x5afca) clears bit 0 of the inbound status and writes it
+           back. Bit 0 is the inbound busy flag, mirroring bit 0 of 0x6cc. */
+        if (reg_write(R_FROM_ARM_STAT, st & ~1u)) break;
     }
+    free(buf);
+    gettimeofday(&now, NULL);
+    long elapsed = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_usec - t0.tv_usec) / 1000;
+    if (!elapsed) elapsed = 1;
+    printf("\n  %ld polls in %ld ms (%ld idle), %d fragments, %ld short reads\n",
+           polls, elapsed, idle, frames, short_reads);
+    printf("  %ld bytes in %ld ms = %.2f Mbps\n",
+           total, elapsed, (double)total * 8.0 / (double)elapsed / 1000.0);
     if (f) fclose(f);
     if (fidx) fclose(fidx);
 
@@ -349,7 +403,22 @@ int main(int argc, char **argv) {
         usleep(25000);
     }
     drain_dma();
-    printf("Card left idle.\n");
+
+    /* Reboot the firmware before letting go of the card. A capture run leaves the
+       gadget degraded - gl310log fills with (E)Drop and "can't get sysmsg" - and in
+       that state the next heavy operation wedges it for good. That is exactly how the
+       third wedge happened: gl310init's firmware download ran against an already
+       poisoned gadget and hung. ResetArm is two OUT-only commands and gives QPSOS a
+       clean gadget in about 8 ms, so there is no reason not to. */
+    printf("Rebooting the firmware to leave the gadget clean.\n");
+    reset_arm(0);
+    usleep(100000);
+    reset_arm(1);
+    usleep(300000);
+    unsigned int chk = 0;
+    if (!reg_read(0x00, &chk)) printf("  reg 0x00 = 0x%08x - channel still answering\n", chk);
+    printf("Card left idle. Re-download the firmware with gl310init --go before\n"
+           "the next capture; check it with gl310log.\n");
 out:
     libusb_release_interface(dev, 0); libusb_close(dev); libusb_exit(NULL);
     return 0;
