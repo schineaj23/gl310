@@ -1,19 +1,20 @@
-# compiled probe/bring-up tools (rebuild with the command in each .c file header)
-tools/desc
-tools/gl310probe
-tools/gl310init
-tools/gl310armtest
-tools/gl310aperture
-tools/gl310life
-tools/gl310log
-tools/gl310mbox
-tools/gl310start
-tools/gl310recover
-tools/gl310ddr
-tools/gl310i2c
-tools/__pycache__/
+# built binaries
+/tools/gl310i2c
+/tools/gl310init
+/tools/gl310start
+/tools/gl310log
+/tools/gl310recover
+/research/tools/gl310probe
+/research/tools/gl310armtest
+/research/tools/gl310aperture
+/research/tools/gl310ddr
+/research/tools/gl310life
+/research/tools/gl310mbox
+/research/tools/desc
+__pycache__/
 *.o
 *.swp
+.DS_Store
 
 # Ghidra working projects: large binary DBs plus lock/temp files
 ghidra/
@@ -22,4 +23,7 @@ gl310.rep/
 *.lock
 *.lock~
 
-captures/*.tmp
+# local captures and test output
+research/captures/*.tmp
+research/captures/out-test*
+research/test/out/

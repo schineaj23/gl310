@@ -1,7 +1,7 @@
 /*
  * gl310start.c - start the hardware H.264 encoder and capture what it produces.
  *
- * Every value here comes from captures/gl310-bringup-debugview.log, i.e. from a real
+ * Every value here comes from research/captures/gl310-bringup-debugview.log, i.e. from a real
  * working 1920x1080 session on this exact card, so nothing is guessed. The log gives
  * the ordered sequence; the driver disassembly gives the encodings.
  *
@@ -44,7 +44,7 @@
  *   - twelve transfers per fragment instead of about thirty
  *
  * The ack params stay as six single writes: op 0x03 RegisterWriteEx misplaces values
- * on this device (see RE.md), so only the read side is batched.
+ * on this device (see research/notes/RE.md), so only the read side is batched.
  *
  * But round trips are not the whole story. Polling flat out with no idle sleep made
  * the card produce NOTHING - 5381 polls/s and zero fragments - because the HCI thread
@@ -157,14 +157,8 @@ static int reg_read_block(unsigned int start, int n, unsigned int *out) {
     for (int i = 0; i < n; i++) out[i] = get32(r + 4 * i);
     return 0;
 }
-/* RegisterWriteEx (op 0x03): n consecutive registers in one command, ascending. */
-static int reg_write_block(unsigned int start, int n, const unsigned int *vals) {
-    unsigned char c[8 + 32 * 4];
-    if (n < 1 || n > 32) return -1;
-    hdr(c, 0x03, 0x01, (unsigned short)n, start);
-    for (int i = 0; i < n; i++) put32(c + 8 + 4 * i, vals[i]);
-    return cmd(c, 8 + 4 * n, NULL, 0);
-}
+/* There is deliberately no batched write: RegisterWriteEx (op 0x03) misplaces values
+   on this device (research/notes/RE.md), so every write below is a single op 0x01. */
 /* Pull and discard anything left sitting in the DMA-in pipe. The command channel
    has no framing, so one short or abandoned bulk transfer desynchronises every
    later transfer on the device - which is how this tool wedged the card twice. */
@@ -245,7 +239,7 @@ int main(int argc, char **argv) {
     long bitrate = -1;   /* VBRBitRate 0x6e8: hi16 peak, lo16 avg, both kbps */
     long rate_kbps = 8000; /* RateControl 0x6ec low 16 bits: CBR target, kbps.
                             The session's 60000 overflows the 128 KiB bitstream
-                            buffer (RE.md), so the default is 8000. */
+                            buffer (research/notes/RE.md), so the default is 8000. */
     unsigned int cfg_reg[8], cfg_val[8]; int ncfg = 0;  /* --cfg REG VAL */
     int stall_ms = 0, stall_at_s = 0;  /* --stall MS AT_S: test catch-up after a hiccup */
     int keep_dups = 0;   /* --keep-dups: output repeated notifications too */
@@ -616,7 +610,7 @@ int main(int argc, char **argv) {
                and it kept re-posting ring state until it gave up.
 
                Single writes, not RegisterWriteEx: op 0x03 misplaces values on this
-               device (see RE.md), so only the read side is batched. */
+               device (see research/notes/RE.md), so only the read side is batched. */
             /* The ARM's HCI handler (0x2d5d8) turns host cmd 0x30 into an internal
                message 0xf7: [8] = task (0x6fc >> 16), [0x10] = 0x6f8 & 0x8f,
                [0x1c] = 0x6f4, [0x14] = 0x6e4 & 0xff, and

@@ -1,7 +1,7 @@
 // GL310Menu.app - menu-bar control for the GL310 HDMI camera.
 //
 // Starts and stops tools/gl310cam and picks its settings. Every choice offered here
-// is one that has been verified on the card (see RE.md); the card is 30 fps only.
+// is one that has been verified on the card (see docs/protocol.md); the card is 30 fps only.
 // Changing a setting while the camera is running restarts the stream (a gap of a
 // few seconds), and apps showing the camera need to reopen it if the size changed.
 import AppKit

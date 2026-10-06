@@ -19,7 +19,7 @@
  * failure, so a NAK and a zero data byte are distinguishable - which is what makes a
  * bus scan possible at all.
  *
- * Commands used (see RE.md):
+ * Commands used (see research/notes/RE.md):
  *      op 0x08  I2CRead           08 00 rlen:u16 slave:u32                -> rlen+1
  *      op 0x08  I2CWriteThenRead  08 wlen:u8 rlen:u16 slave:u32 wdata[]   -> rlen+1
  *      op 0x05  I2CWrite          05 01 len:u16 slave:u32 data[len]       -> 1 byte
@@ -156,6 +156,8 @@ static void switch_mode(unsigned int flag) {
              read MCU sub 0x13, 1 byte -> the value
 */
 #define MCU 0x15
+/* Not called by any mode yet; kept as the documented write half of the bridge. */
+__attribute__((unused))
 static int nuc_write(unsigned int slave, unsigned int reg, unsigned int val) {
     unsigned char a[5] = {0x0e, (unsigned char)slave, 1, (unsigned char)reg, 1};
     unsigned char b[2] = {0x13, (unsigned char)val};

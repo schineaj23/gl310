@@ -3,7 +3,7 @@
 fwarm.py - first-pass analysis of qpvidfwusb.bin (the GL310's ARM32 firmware).
 
 The image is a flat ARM32 little-endian binary with its exception vector table at
-offset 0, loaded at base 0x00000000 (see ../RE.md).
+offset 0, loaded at base 0x00000000 (see ../notes/RE.md).
 
   vectors        decode the 8-entry exception vector table + its literal pool
   strings        printable strings, with offsets (version / build / subsystem names)

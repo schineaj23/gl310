@@ -1,5 +1,11 @@
 # GL310 (07ca:c835) USB command protocol, recovered from AVer330USB.sys
 
+> **Paths in this journal predate the repository reorganisation.** `captures/` is now
+> `research/captures/`. The probe tools (`gl310probe`, `gl310mbox`, `gl310ddr`,
+> `gl310life`, `gl310armtest`, `gl310aperture`, `fwarm.py`, `sysmap.py`, …) are now in
+> `research/tools/`. The working tools are still in `tools/`. For the condensed result,
+> read [docs/protocol.md](../../docs/protocol.md).
+
 Source: static disassembly of `vendor/AVer330USB.sys` (3.2802.64.40, the checked build),
 using the `CUsbCntl_*` functions located through their own debug strings. The DMA and
 mailbox behaviour was cross-checked against `captures/gl310-bringup-debugview.log`

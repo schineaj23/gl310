@@ -8,13 +8,13 @@
 #
 #   --res     output height: 1080 (default) or 720. The card always encodes 1080p30
 #             (30 fps is the only rate AVerMedia documents); 720 is scaled here,
-#             because the card's own 1280x720 mode crops instead of scaling (RE.md).
+#             because the card's own 1280x720 mode crops instead of scaling (docs/protocol.md).
 #   --aspect  16:9 = the whole frame (default). 4:3 = crop the 4:3 picture out of
 #             a pillarboxed 16:9 signal (240 px bars each side): 1440x1080 or
 #             960x720, no black bars.
 #   --rate    H.264 bitrate in kbps; only presets verified on the card are accepted.
 #
-# Needs the extension activated (macos/README.md) and ffmpeg. Ctrl-C stops it all;
+# Needs the extension activated (docs/macos.md) and ffmpeg. Ctrl-C stops it all;
 # gl310start then stops the encoder and reboots the card's firmware cleanly.
 #
 # Latency, measured by replaying a capture with its recorded timing:

@@ -1,7 +1,7 @@
 /*
  * gl310probe.c - validate the recovered GL310 command protocol on real hardware.
  *
- * Implements CUsbCntl_GenericCmd as documented in ../RE.md:
+ * Implements CUsbCntl_GenericCmd as documented in ../notes/RE.md:
  *     bulk OUT EP 0x04 <- command bytes
  *     bulk IN  EP 0x83 -> reply bytes (raw, no framing)
  *

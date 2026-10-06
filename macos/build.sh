@@ -10,7 +10,7 @@
 # entitlement, which macOS only honours with a provisioning profile from a paid
 # Apple Developer Program team. Pass PROFILE=path/to/app.provisionprofile (and
 # EXT_PROFILE=... for the extension) to embed them. An ad-hoc build compiles and
-# assembles correctly but will only load with SIP / AMFI relaxed - see macos/README.md.
+# assembles correctly but will only load with SIP disabled - see docs/macos.md.
 set -e
 cd "$(dirname "$0")"
 TEAM_ID=${TEAM_ID:-XXXXXXXXXX}

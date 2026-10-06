@@ -1,7 +1,7 @@
 /*
  * gl310init.c - bring up the AVerMedia GL310 (07ca:c835) over libusb.
  *
- * Implements the bring-up sequence recovered in ../RE.md, which the Windows
+ * Implements the bring-up sequence recovered in research/notes/RE.md, which the Windows
  * driver logs as:
  *
  *     CQLCodec_FWDownloadAll() checkState(0) verify(1)
@@ -21,7 +21,7 @@
  * power maintained, the DDR controller config at 0xf00.. and the HCI windows at
  * 0x800.. both survive an ARM reset -- verified by reading them back after a
  * reset cycle. DDR training is only needed after a true power cycle, and its
- * command script is not yet fully recovered (see ../RE.md).
+ * command script is not yet fully recovered (see research/notes/RE.md).
  *
  * Build:
  *   clang -O2 -o gl310init gl310init.c -I/opt/homebrew/include \
@@ -50,8 +50,26 @@
 #define BULK_TIMEOUT 5000
 #define CHUNK        32768            /* bytes per DMA chunk, as the driver uses */
 
-#define VID_FW "../vendor/qpvidfwusb.bin"
-#define AUD_FW "../vendor/qpaudfwusb.bin"
+/* The two firmware images from AVerMedia's Windows driver package. They are found
+   in $GL310_FIRMWARE if set, otherwise in ../vendor relative to this executable. */
+static char VID_FW[4096], AUD_FW[4096];
+
+static void firmware_paths(const char *argv0) {
+    const char *dir = getenv("GL310_FIRMWARE");
+    char exe[4096], base[4096];
+    if (!dir) {
+        if (realpath(argv0, exe)) {
+            char *slash = strrchr(exe, '/');
+            if (slash) *slash = 0;
+            snprintf(base, sizeof base, "%s/../vendor", exe);
+        } else {
+            snprintf(base, sizeof base, "../vendor");
+        }
+        dir = base;
+    }
+    snprintf(VID_FW, sizeof VID_FW, "%s/qpvidfwusb.bin", dir);
+    snprintf(AUD_FW, sizeof AUD_FW, "%s/qpaudfwusb.bin", dir);
+}
 #define VID_ADDR 0x000000              /* byte address in ARM space */
 #define AUD_ADDR 0x100000
 
@@ -291,6 +309,7 @@ static int check_alive(void) {
 /* ----------------------------------------------------------------------- main */
 
 int main(int argc, char **argv) {
+    firmware_paths(argv[0]);
     int go = 0, check_only = 0, verify = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--go")) go = 1;

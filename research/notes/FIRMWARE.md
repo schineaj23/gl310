@@ -1,7 +1,7 @@
 # qpvidfwusb.bin — the GL310's ARM firmware ("QPSOS")
 
 First-pass analysis of the 454,064-byte ARM32 image shipped in the Windows driver
-package. Tool: `tools/fwarm.py` (capstone). Everything below is reproducible with
+package. Tool: `research/tools/fwarm.py` (capstone). Everything below is reproducible with
 the subcommands shown.
 
 ## Image layout
