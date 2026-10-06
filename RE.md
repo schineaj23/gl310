@@ -900,16 +900,125 @@ invocations advanced correctly. Treat consecutive `MemoryRead`s of one address a
 possibly latched, and prefer DMA reads (`gl310life`) when a value must be fresh. The
 818 KB byte-exact firmware verify went through DMA, so that result is unaffected.
 
+## It works: H.264 captured from the card
+
+**The encoder runs and produces a valid stream.** `tools/gl310start.c` performs the
+sequence below and captured 95,128 bytes that **ffmpeg independently identifies**:
+
+```
+Stream #0  h264  (H.264 / AVC / MPEG-4 AVC)  stream_type 0x1b  PID 0x44
+Stream #1  aac                               stream_type 0x0f
+ts_packetsize=188   start_pts=6010
+```
+
+Saved as `captures/first-capture-1080p.ts`. 505 of 505 TS packets carry sync `0x47`.
+
+**The output is MPEG-2 Transport Stream, 32-bit byte-swapped on the wire.** That is
+what `swap(1)` means in the driver's `CQLCodec_StartDMARead` calls. Un-swap each
+4-byte word and the TS appears immediately — PAT on PID 0, PMT on `0x42`, elementary
+stream on `0x44`. So the card does not emit raw H.264; it emits a muxed TS with AAC
+audio alongside, which is why `SystemControl = 0x2101c219` and the audio config
+registers matter even for video-only use.
+
+Only the first fragment was captured, so ffmpeg reports `width=0` — there is no SPS
+in it. That needs continuous capture, see below.
+
+### The sequence, verbatim from the working session
+
+Every value comes from `captures/gl310-bringup-debugview.log`, i.e. from this card
+actually working at 1920x1080, so none of it is guessed.
+
+```
+cmd 0xf1  SystemOpen   p1 = 0x80000011
+cmd 0xf2  SystemLink   p1 = 0x01000100
+          (4 bits per field: vi=0 vic=0 vo=1 voc=0 ai=0 aic=0 ao=1 aoc=0)
+cmd 0x10  sel 0x0f  ExternalTriggerToSync   0, 0
+cmd 0x10  sel 0x10  PTSResetByTrigger       0, 0, 0
+cmd 0x10  sel 0x12  DeinterlaceMode         1
+cmd 0x10  sel 0x13  RateControlEx           120, 0, 8
+cmd 0x10  sel 0x14  LargeCompressBuffer     0x80004a38
+cmd 0x10  sel 0x16  AVDiscardControl        2
+cmd 0x10  sel 0x17  UseSWPTS                1
+cmd 0x10  sel 0x02  ViuSyncCode             0xf1f1f1da, 0xb6f1f1b6
+```
+
+then eleven **direct register writes** — no message — which is the whole of
+`CQLCodec_UpdateEncoderConfig`:
+
+| register | value | field |
+|----------|-------|-------|
+| `0x6f8` | `0x2101c219` | SystemControl |
+| `0x6f4` | `0x04380780` | PictureResolution — `0x780`=1920, `0x438`=1080 |
+| `0x6f0` | `0x0f5e0608` | InputControl |
+| `0x6ec` | `0x0078ea60` | RateControl |
+| `0x6e8` | `0x1f4007d0` | VBRBitRate |
+| `0x6e4` | `0x80002000` | FilterControl |
+| `0x6e0` | `0xf199001e` | GOPLoopFilter |
+| `0x6d8` | `0x00000010` | BlockSize |
+| `0x6dc` | `0x04380780` | OutPicResolution |
+| `0x6d4` | `0x21161100` | AudioControl |
+| `0x6d0` | `0x520840f4` | AudioControlEx |
+
+and finally `cmd 0x01 StartEncoder`.
+
+Two things worth noting. The config block occupies the **same registers as the mailbox
+parameters** — one shared scratch window — which is why ordering matters: the ARM
+consumes each property message before the next write lands. And there is **no
+`UpdateConfig` (cmd `0x06`)** between the config writes and `StartEncoder`, so the ARM
+reads those registers while processing `StartEncoder`.
+
+The register addresses are not immediates in the driver; they live in codec object
+fields `0x312`–`0x328`, one `u16` per setter, and each setter
+(`QPFWENCAPI_SetSystemControl` at `0x5b610` and the eleven following it) just does
+`RegisterWrite(*(u16*)(this+field), value)`.
+
+### Frame delivery
+
+The ARM posts, on `0x6b0`:
+
+```
+cmd 0x40  p1 = 0x83 (stream type)  p2 = buffer address in WORDS
+          p3 = 0                   p4 = length in WORDS
+```
+
+Observed live: `p2=0x601b00` (byte `0x1806c00`), `p4=0x5ce6` = 95,128 bytes. The host
+DMA-reads that, then must do **both** of these or the ARM re-posts the same descriptor
+forever:
+
+1. `CTask_CompleteArm` (`0x725d0`) sends message code **`0x30`**, echoing p1..p4.
+2. `QPFWAPI_AckARMMessage` (`0x5ae40`) finishes by **writing the inbound status word
+   back to `0x6c8`**. This is the step that frees the ARM to post the next message.
+
+Doing only (1) is exactly the bug that produced 40 reads of one descriptor in the
+first run. The ack reply message (code `0x31` for encoder, `0xa2` for decoder) is only
+sent when bit 8 of the incoming message is set, and `cmd 0x40` arrives with it clear.
+
+### Hazard: the command channel can wedge
+
+`CUsbCntl_GenericCmd` is a bare request/response pair on two bulk pipes with no
+framing and no sequence numbers, so it cannot resynchronise. Once the encoder is
+running and also pushing data on the DMA-in pipe, an abandoned or unread reply leaves
+every later read timing out. `tools/gl310recover.c` escalates: drain the IN pipes,
+`clear_halt`, then a `ResetArm` toggle — which works even with the IN path dead,
+because `ResetArm` is OUT-only.
+
+**Do not use `libusb_reset_device()` on macOS for this.** It left the card enumerating
+perfectly (`ioreg` shows `Aver_C835_USB`, `07ca:c835`, registered/matched/active)
+while `libusb_open()` returned `LIBUSB_ERROR_OTHER` and then hung outright. Nothing in
+user space recovered it — it needed a physical replug, which also costs the warm
+state. That reset is now last and behind `--hard` in `gl310recover`.
+
 ## Still to do
 
-The firmware is up and takes commands, so the remaining work is the actual goal:
-get frames out.
-
-- **`CQLCodec_UpdateEncoderConfig` (`0x577b0`)** — the property values for a given
-  mode. Then `StartEncoder` and watch for an ARM→host message on `0x6b0`/`0x6c8`.
-- **The frame path.** Per the log, the ARM posts `cmd 0x40` with p1 = stream type,
-  p2 = ARM address, p4 = length in words; the host DMA-reads that address with
-  `swap(1)` on EP `0x81`, then acks. `CTask_CompleteArm` (`0x725d0`) is the host side.
+- **Continuous capture.** Implement both halves of the ack and verify sequential,
+  distinct buffers; then a full TS with SPS/PPS, which gives resolution and frame rate.
+- **Un-swap on the fly** (32-bit word swap) and feed the TS to a decoder.
+- **ADV7441 setup.** `CADI7441_InitDevice` plus `CADI7441_SelectVideoSource source(20)`
+  run over HW I²C (op `0x08`; SW I²C is unimplemented in firmware). Not needed while
+  the receiver retains its configuration from the Windows session — which is evidently
+  the case, since the encoder produced real data — but required after a cold start.
+- Then the portable `libgl310` core, a macOS CMIOExtension and a Linux v4l2loopback
+  sink, decoding the TS with VideoToolbox / VAAPI.
 - **Post-boot init.** `CQLCodecLib_InitDevice`, then the `CQLCodec_Set` properties
   for stream type/profile/level, then encoder start (`CEncoderTask_*`,
   `QPFWENCAPI_*`). Every one of these should now be visible in `gl310log --follow`.
