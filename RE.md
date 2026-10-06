@@ -1803,3 +1803,46 @@ constant, rebooting the firmware between runs:
 Only TS produces output in this configuration. Selecting the raw path must therefore
 happen elsewhere — the task/channel `dataType`, or `SYS_FUNCTION` (`0x80000011`), or
 `SYS_LINK`'s `video_output` field — not in `SystemControl`.
+
+### The YUV selector found: it is `p1`, not any config field
+
+`CEncoderTask_ProcessArmMessage` dispatches through a jump table on **`p1`** — the
+stream type in the ARM's message — not on the command code. Extracting the table
+(index bytes at RVA `0x79e44`, targets at `0x79e30`, entries are RVAs):
+
+| `p1` | buffer type |
+|------|-------------|
+| `0x00` | `ARM_BUF_YUVRAS` |
+| **`0x80`** | **`ARM_BUF_YUV` / `ARM_BUF_YUVMB2RAS`** |
+| `0x01` `0x06` `0x81` `0x82` `0x83` `0x84` `0x85` `0x86` | `ARM_BUF_OTHERS` (compressed) |
+| everything else | unhandled |
+
+Every buffer we have ever captured has `p1 = 0x83`. **Raw YUV is `p1 = 0x80`**, so the
+question is only what makes the ARM tag its buffers that way.
+
+### Four candidate levers, all swept, none of them it
+
+Each run: reboot the firmware, apply the change, capture 2 s, read `p1` of the first
+buffer.
+
+| lever | values tried | result |
+|-------|--------------|--------|
+| `SystemControl` stream type (`0x6f8` bits 0-2) | 0, 2, 3, 4 | **0 fragments**; only 1 streams |
+| `SystemLink` `video_output` | 0, 2, 3 | 0 and 2 dead; 3 streams but `p1 = 0x83` |
+| `SetEncMode` capMode (cmd `0x11`) | 0, 1, 2, 3 | 1-3 dead; 0 streams, `p1 = 0x83` |
+| `SetRawVideoDecimation` output_format (sel `0x11`) | 1, 2, 3 | all stream, all `p1 = 0x83` |
+
+The pattern is informative: most deviations stop the encoder dead, while
+`SetRawVideoDecimation` is accepted without disturbing it and changes nothing. That is
+what a *configuration* for a path that is not running looks like.
+
+So raw output is very likely **a separate ARM task**, not a mode on the encoder task —
+matching the host side, where `CDevice::allocateRawVideoOuputTask` creates a distinct
+`CTaskRawVideo` object with its own `setOutputResolution` / `setOutputFrameRate` /
+`setDeInterlace`, alongside the encode task.
+
+**Next test:** every mailbox message we send uses `taskId 0`. Open a *second* task —
+`SystemOpen` / `SystemLink` with `taskId 1` — and start it, then watch for buffers
+tagged `p1 = 0x80`. `CYUVInChannel_GetBuffer` / `CYUVInChannel_CompleteBuffer` are the
+host-side counterparts to the `cmd 0x40` / `cmd 0x30` pair we already drive for the
+compressed task.

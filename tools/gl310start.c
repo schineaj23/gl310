@@ -234,6 +234,9 @@ static int prop(const char *label, unsigned int sel,
 int main(int argc, char **argv) {
     int go = 0, stop = 0, watch_s = 5, keep = 0, idle_us = 1000;
     int stream_type = -1;   /* bits 0-2 of SystemControl, 0x6f8 */
+    int vout = -1;          /* SystemLink video_output nibble, bits 8-11 */
+    int capmode = -1;       /* QPFWENCAPI_SetEncMode, cmd 0x11 */
+    int rawfmt = -1;        /* SetRawVideoDecimation output_format, sel 0x11 */
     const char *outpath = "gl310-capture.bin";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--go")) go = 1;
@@ -241,6 +244,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--keep")) keep = 1;
         else if (!strcmp(argv[i], "--stream-type") && i + 1 < argc)
             stream_type = (int)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--video-output") && i + 1 < argc)
+            vout = (int)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--cap-mode") && i + 1 < argc)
+            capmode = (int)strtoul(argv[++i], 0, 0);
+        else if (!strcmp(argv[i], "--raw-format") && i + 1 < argc)
+            rawfmt = (int)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--idle-us") && i + 1 < argc) idle_us = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch_s = atoi(argv[++i]);
@@ -275,7 +284,11 @@ int main(int argc, char **argv) {
     if (send_msg("SystemOpen", 0xf1, 0, one, 1)) goto out;
 
     /* 4 bits per field: vi=0 vic=0 vo=1 voc=0 ai=0 aic=0 ao=1 aoc=0 */
-    one[0] = (0u) | (0u<<4) | (1u<<8) | (0u<<12) | (0u<<16) | (0u<<20) | (1u<<24) | (0u<<28);
+    {
+        unsigned int vo = (vout >= 0) ? (unsigned)vout & 0xf : 1u;
+        one[0] = (0u) | (0u<<4) | (vo<<8) | (0u<<12) | (0u<<16) | (0u<<20) | (1u<<24) | (0u<<28);
+        if (vout >= 0) printf("  SystemLink video_output -> %u (0x%08x)\n", vo, one[0]);
+    }
     if (send_msg("SystemLink", 0xf2, 0, one, 1)) goto out;
 
     printf("\n  properties:\n");
@@ -287,6 +300,17 @@ int main(int argc, char **argv) {
     prop("AVDiscardControl",      0x16, 2, 0, 0, 1);
     prop("UseSWPTS",              0x17, 1, 0, 0, 1);
     prop("ViuSyncCode",           0x02, 0xf1f1f1da, 0xb6f1f1b6, 0, 2);
+    if (rawfmt >= 0) {
+        /* QPFWENCAPI_SetRawVideoDecimation(input_format, output_format,
+           scale_factor) = property selector 0x11. */
+        prop("RawVideoDecimation", 0x11, 0, (unsigned)rawfmt, 0, 3);
+    }
+    if (capmode >= 0) {
+        /* QPFWENCAPI_SetEncMode(taskId, capMode, trigMode, gpio_pin):
+           p1 = capMode (0x6f8), p2 = trigMode (0x6f4), p3 = gpio_pin (0x6f0). */
+        unsigned int ep[3] = { (unsigned)capmode, 0, 0 };
+        send_msg("SetEncMode", 0x11, 0, ep, 3);
+    }
 
     printf("\n  encoder config block:\n");
     for (int i = 0; i < NCONFIG; i++) {
@@ -372,6 +396,9 @@ int main(int argc, char **argv) {
                                     ms, total, done, p[0], p[1], p[2], p[3], p[4]);
                         fwrite(buf, 1, done, f); total += done; frames++;
                     }
+                    if (frames == 1)
+                        printf("    first buffer: p1(stream type) = 0x%02x  %s\n", p[0],
+                               p[0]==0x80 ? "<- ARM_BUF_YUV!" : (p[0]==0x83 ? "(compressed)" : ""));
                     if (verbose)
                         printf("  [%5ld ms] cmd 0x%02x  addr 0x%06x  %u B  last=%u\n",
                                ms, msg & 0xff, addr, done, p[2]);
