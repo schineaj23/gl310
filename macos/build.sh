@@ -29,12 +29,35 @@ rm -rf "$OUT"
 mkdir -p "$APP/Contents/MacOS" "$EXT/Contents/MacOS"
 
 echo "== compiling ($APP_ID)"
+TOOLS_DIR=$(cd ../tools && pwd)
+RATES=$(sed -n 's/^RATES="\(.*\)"/\1/p' "$TOOLS_DIR/gl310cam")
 cat > "$OUT/BuildIDs.swift" <<EOF
 extension GL310 { static let extensionID = "$EXT_ID" }
+enum GL310Menu {
+    static let toolsDir = "$TOOLS_DIR"
+    static let rates: [Int] = [$(echo $RATES | sed 's/ /, /g')]
+}
 EOF
 $SWIFTC -o "$EXT/Contents/MacOS/$EXT_ID" Shared/IDs.swift "$OUT/BuildIDs.swift" Extension/*.swift
 $SWIFTC -o "$APP/Contents/MacOS/GL310Camera" Shared/IDs.swift "$OUT/BuildIDs.swift" App/main.swift
 $SWIFTC -o "$OUT/gl310feed" Shared/IDs.swift "$OUT/BuildIDs.swift" Feeder/main.swift
+MENU=$OUT/GL310Menu.app
+mkdir -p "$MENU/Contents/MacOS"
+$SWIFTC -parse-as-library -o "$MENU/Contents/MacOS/GL310Menu" Shared/IDs.swift "$OUT/BuildIDs.swift" Menu/main.swift
+cat > "$MENU/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_PREFIX.gl310.menu</string>
+  <key>CFBundleName</key><string>GL310 Camera</string>
+  <key>CFBundleExecutable</key><string>GL310Menu</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+EOF
 ${SWIFTC%13.0}14.0 -o "$OUT/gl310probe-cam" Shared/IDs.swift "$OUT/BuildIDs.swift" Probe/main.swift
 
 echo "== bundles"
@@ -60,8 +83,8 @@ cat > "$EXT/Contents/Info.plist" <<EOF
   <key>CFBundleName</key><string>GL310 HDMI Camera</string>
   <key>CFBundleExecutable</key><string>$EXT_ID</string>
   <key>CFBundlePackageType</key><string>SYSX</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>0.2</string>
+  <key>CFBundleVersion</key><string>$(date +%s)</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSSystemExtensionUsageDescription</key>
   <string>Makes the GL310 / C835 HDMI capture card available as a camera.</string>
@@ -98,6 +121,7 @@ codesign --force --options runtime --timestamp=none --entitlements "$OUT/app.ent
          -s "$SIGN_ID" "$APP"
 codesign --force -s "$SIGN_ID" "$OUT/gl310feed"
 codesign --force -s "$SIGN_ID" "$OUT/gl310probe-cam"
+codesign --force -s "$SIGN_ID" "$MENU"
 codesign --verify --strict --deep "$APP" && echo "signature structure OK"
 
 echo

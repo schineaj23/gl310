@@ -16,6 +16,10 @@ final class Probe: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sbuf: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        if total == 0, let pb = CMSampleBufferGetImageBuffer(sbuf) {
+            print("first frame: \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb))")
+            fflush(stdout)
+        }
         let pts = CMSampleBufferGetPresentationTimeStamp(sbuf)
         let now = CMClockGetTime(CMClockGetHostTimeClock())
         let ms = (now.seconds - pts.seconds) * 1000
@@ -42,6 +46,8 @@ guard let cam = devices.first(where: { $0.localizedName == GL310.deviceName }) e
     err("no \"\(GL310.deviceName)\" camera; found: \(devices.map(\.localizedName))")
     exit(1)
 }
+let dims = CMVideoFormatDescriptionGetDimensions(cam.activeFormat.formatDescription)
+err("camera format: \(dims.width)x\(dims.height)")
 let session = AVCaptureSession()
 let input = try AVCaptureDeviceInput(device: cam)
 session.addInput(input)

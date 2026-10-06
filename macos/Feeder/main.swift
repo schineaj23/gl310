@@ -1,6 +1,7 @@
 // gl310feed - push decoded frames into the GL310 camera extension's sink stream.
 //
-// Reads raw NV12 1920x1080 frames on stdin (ffmpeg -f rawvideo -pix_fmt nv12) and
+// Reads raw NV12 frames on stdin (ffmpeg -f rawvideo -pix_fmt nv12), 1920x1080 or
+// --size WxH (one of GL310.sizes; the camera adopts whatever size arrives), and
 // enqueues each one, as an IOSurface-backed CVPixelBuffer, on the sink stream's
 // CMSimpleQueue - the same mechanism OBS uses to drive its virtual camera.
 //
@@ -11,7 +12,19 @@ import CoreMediaIO
 import CoreVideo
 import Foundation
 
-let W = Int(GL310.width), H = Int(GL310.height)
+func sizeArg() -> (Int, Int) {
+    let a = CommandLine.arguments
+    guard let i = a.firstIndex(of: "--size"), i + 1 < a.count else {
+        return (Int(GL310.width), Int(GL310.height))
+    }
+    let p = a[i + 1].split(separator: "x").compactMap { Int32($0) }
+    guard p.count == 2, GL310.sizes.contains(where: { $0.w == p[0] && $0.h == p[1] }) else {
+        FileHandle.standardError.write("gl310feed: --size must be one of \(GL310.sizes.map { "\($0.w)x\($0.h)" })\n".data(using: .utf8)!)
+        exit(2)
+    }
+    return (Int(p[0]), Int(p[1]))
+}
+let (W, H) = sizeArg()
 let frameBytes = W * H * 3 / 2
 let dryRun = CommandLine.arguments.contains("--dry-run")
 

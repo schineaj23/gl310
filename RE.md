@@ -2115,3 +2115,40 @@ were recovered and none needed the repeat fallback.
 
 `ffmpeg -t 8` combined with a one-frame `select` never terminates. It was not a
 `gl310live` problem.
+
+## Supported configurations
+
+### What AVerMedia documents
+
+- **Datasheet** (`DS_GL310_EN.pdf`): recording quality **1080p@30**, **max bitrate 60 Mbps**,
+  HDMI input. No other resolutions or frame rates.
+- **Driver INF** factory defaults (`AVer835_x64.inf`, `[Encoder]`): `EncPictureResolution`
+  and `EncOutPictureResolution` = `0x02d00500` (1280x720), `EncRateControl` = `0x00501f40`
+  (8000 kbps, qp_update 80), `EncInputControl` = `0x3e7c0609`, `EncSystemControl` =
+  `0x2101b219`, `EncLargeCompressBufferControl` = 19000. The 19000 is the 0x4a38 size
+  that `LargeCompressBuffer` needs as p3.
+- **RECentral** `profile.xml` (Live Gamer Portable family): record at 1920x1080, 30 fps,
+  12000 kbps; live streaming at 2000 kbps, 30 fps. Its resolution string list is shared
+  across all their cards and says nothing specific to this one.
+
+### Tested on the card (25 s each, `cfgtest.sh`)
+
+| config | measured | decode errors | frames |
+|---|---|---|---|
+| 1080p 2 / 4 / 8 / 12 / 20 / 30 / 40 Mbps | within ~0.6 Mbps of target | 0 | 747 / 747 |
+| 1080p **60 Mbps** | 59.6 Mbps | **2** | **724**: frames lost over USB |
+| "720p" (`0x6f4` = `0x6dc` = `0x02d00500`) | correct 1280x720 stream, 0 errors | 0 | 747 |
+
+The 720p setting **crops** instead of scaling. It takes the top-left 1280x720 of the
+1920x1080 input: the left pillarbox stays 239 px wide and the picture is cut off on the
+right and bottom. The driver's `PICTURE_RESOLUTION` log format has `v_scale` / `h_scale`
+fields, so scaling probably needs further bits in those words; this was not pursued.
+`gl310cam` therefore always encodes 1080p and scales to 720 on the Mac.
+
+### The 4:3 source
+
+The camera on the HDMI input sends 1080i with a 4:3 picture pillarboxed into 16:9:
+measured active area x = 240..1679, i.e. 1440x1080 with 240 px bars on each side.
+`--aspect 4:3` crops exactly that. The camera extension rebuilds its source stream at the
+incoming frame size, so apps see a native 1440x1080 (or 960x720) camera. Verified with
+`gl310probe-cam`: format 1440x1080, frames 1440x1080, 30 fps, ~3 ms delivery.

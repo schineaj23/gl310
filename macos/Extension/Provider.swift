@@ -8,6 +8,12 @@
 // user-space tools that already work (tools/gl310live), and frames arrive here
 // through the sink. When nothing has arrived for half a second the source shows
 // a flat placeholder, so clients see "no signal" rather than a frozen picture.
+//
+// Frame size follows the frames: the sink accepts any size in GL310.sizes, and when
+// the size arriving changes (gl310cam --res / --aspect, or the menu-bar app), the
+// source stream is rebuilt with that size as its only format, so apps see the
+// picture natively - e.g. 1440x1080 4:3 with no bars. Apps already showing the
+// camera need to reopen it. The last size is remembered across restarts.
 import CoreMedia
 import CoreMediaIO
 import CoreVideo
@@ -24,7 +30,8 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
     private var sourceSrc: SourceStreamSource!
     private var sinkSrc: SinkStreamSource!
 
-    private let videoDesc: CMFormatDescription
+    private var curW: Int32
+    private var curH: Int32
     private let frameDuration = CMTime(value: 1, timescale: GL310.fps)
     private let queue = DispatchQueue(label: "gl310.camera", qos: .userInteractive)
 
@@ -38,24 +45,33 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
     private var consumeInFlight = false
     private var sinkTimer: DispatchSourceTimer?
 
-    init(localizedName: String) {
+    private func format(_ w: Int32, _ h: Int32) -> CMIOExtensionStreamFormat {
         var desc: CMFormatDescription?
         CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault,
                                        codecType: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                                       width: GL310.width, height: GL310.height,
-                                       extensions: nil, formatDescriptionOut: &desc)
-        videoDesc = desc!
+                                       width: w, height: h, extensions: nil,
+                                       formatDescriptionOut: &desc)
+        return CMIOExtensionStreamFormat(formatDescription: desc!,
+                                         maxFrameDuration: frameDuration,
+                                         minFrameDuration: frameDuration,
+                                         validFrameDurations: nil)
+    }
+
+    init(localizedName: String) {
+        let saved = UserDefaults.standard.string(forKey: "size") ?? ""
+        let parts = saved.split(separator: "x").compactMap { Int32($0) }
+        if parts.count == 2, GL310.sizes.contains(where: { $0.w == parts[0] && $0.h == parts[1] }) {
+            curW = parts[0]; curH = parts[1]
+        } else {
+            curW = GL310.width; curH = GL310.height
+        }
         super.init()
 
         device = CMIOExtensionDevice(localizedName: localizedName,
                                      deviceID: UUID(uuidString: GL310.deviceUID)!,
                                      legacyDeviceID: GL310.deviceUID, source: self)
-        let format = CMIOExtensionStreamFormat(formatDescription: videoDesc,
-                                               maxFrameDuration: frameDuration,
-                                               minFrameDuration: frameDuration,
-                                               validFrameDurations: nil)
-        sourceSrc = SourceStreamSource(device: self, format: format)
-        sinkSrc = SinkStreamSource(device: self, format: format)
+        sourceSrc = SourceStreamSource(device: self, formats: [format(curW, curH)])
+        sinkSrc = SinkStreamSource(device: self, formats: GL310.sizes.map { format($0.w, $0.h) })
         sourceStream = CMIOExtensionStream(localizedName: "GL310 Video",
                                            streamID: UUID(uuidString: GL310.sourceUID)!,
                                            direction: .source, clockType: .hostTime,
@@ -69,6 +85,28 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
             try device.addStream(sinkStream)
         } catch {
             fatalError("addStream: \(error)")
+        }
+        placeholder = makePlaceholder()
+    }
+
+    // Replace the source stream with one whose only format is w x h. Runs on queue.
+    private func rebuildSource(_ w: Int32, _ h: Int32) {
+        log.info("frame size \(w)x\(h): rebuilding source stream")
+        placeholderTimer?.cancel()
+        placeholderTimer = nil
+        sourceClients = 0
+        do { try device.removeStream(sourceStream) } catch {
+            log.error("removeStream: \(error.localizedDescription)")
+        }
+        curW = w; curH = h
+        UserDefaults.standard.set("\(w)x\(h)", forKey: "size")
+        sourceSrc = SourceStreamSource(device: self, formats: [format(w, h)])
+        sourceStream = CMIOExtensionStream(localizedName: "GL310 Video",
+                                           streamID: UUID(uuidString: GL310.sourceUID)!,
+                                           direction: .source, clockType: .hostTime,
+                                           source: sourceSrc)
+        do { try device.addStream(sourceStream) } catch {
+            log.error("addStream: \(error.localizedDescription)")
         }
         placeholder = makePlaceholder()
     }
@@ -172,6 +210,11 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
             self.queue.async {
                 self.consumeInFlight = false
                 guard let sbuf, let pb = CMSampleBufferGetImageBuffer(sbuf) else { return }
+                let w = Int32(CVPixelBufferGetWidth(pb)), h = Int32(CVPixelBufferGetHeight(pb))
+                if w != self.curW || h != self.curH {
+                    guard GL310.sizes.contains(where: { $0.w == w && $0.h == h }) else { return }
+                    self.rebuildSource(w, h)
+                }
                 let now = nowNs()
                 self.lastSinkFrameNs = now
                 self.send(pb, hostNs: now)
@@ -186,12 +229,12 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
     private func makePlaceholder() -> CVPixelBuffer? {
         var pb: CVPixelBuffer?
         let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:]]
-        CVPixelBufferCreate(kCFAllocatorDefault, Int(GL310.width), Int(GL310.height),
+        CVPixelBufferCreate(kCFAllocatorDefault, Int(curW), Int(curH),
                             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                             attrs as CFDictionary, &pb)
         guard let pb else { return nil }
         CVPixelBufferLockBaseAddress(pb, [])
-        let h = Int(GL310.height)
+        let h = Int(curH)
         let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!.assumingMemoryBound(to: UInt8.self)
         let yStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
         for row in 0..<h {
@@ -211,14 +254,12 @@ func nowNs() -> UInt64 {
 
 final class SourceStreamSource: NSObject, CMIOExtensionStreamSource {
     private weak var device: DeviceSource?
-    private let format: CMIOExtensionStreamFormat
+    let formats: [CMIOExtensionStreamFormat]
 
-    init(device: DeviceSource, format: CMIOExtensionStreamFormat) {
+    init(device: DeviceSource, formats: [CMIOExtensionStreamFormat]) {
         self.device = device
-        self.format = format
+        self.formats = formats
     }
-
-    var formats: [CMIOExtensionStreamFormat] { [format] }
     var availableProperties: Set<CMIOExtensionProperty> {
         [.streamActiveFormatIndex, .streamFrameDuration]
     }
@@ -241,15 +282,13 @@ final class SourceStreamSource: NSObject, CMIOExtensionStreamSource {
 
 final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
     private weak var device: DeviceSource?
-    private let format: CMIOExtensionStreamFormat
+    let formats: [CMIOExtensionStreamFormat]
     private var client: CMIOExtensionClient?
 
-    init(device: DeviceSource, format: CMIOExtensionStreamFormat) {
+    init(device: DeviceSource, formats: [CMIOExtensionStreamFormat]) {
         self.device = device
-        self.format = format
+        self.formats = formats
     }
-
-    var formats: [CMIOExtensionStreamFormat] { [format] }
     var availableProperties: Set<CMIOExtensionProperty> {
         [.streamActiveFormatIndex, .streamFrameDuration, .streamSinkBufferQueueSize,
          .streamSinkBuffersRequiredForStartup, .streamSinkBufferUnderrunCount,

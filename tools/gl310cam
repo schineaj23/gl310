@@ -2,21 +2,62 @@
 # gl310cam - drive the "GL310 HDMI" macOS camera from the card.
 #
 #   card --USB--> gl310live (H.264 in MPEG-TS) --> ffmpeg (VideoToolbox decode
-#   to NV12) --> gl310feed --> camera extension sink --> any camera app
+#   to NV12, optional 4:3 crop) --> gl310feed --> camera extension --> any app
+#
+#   tools/gl310cam [--res 1080|720] [--aspect 16:9|4:3] [--rate KBPS] [--dry-run]
+#
+#   --res     output height: 1080 (default) or 720. The card always encodes 1080p30
+#             (30 fps is the only rate AVerMedia documents); 720 is scaled here,
+#             because the card's own 1280x720 mode crops instead of scaling (RE.md).
+#   --aspect  16:9 = the whole frame (default). 4:3 = crop the 4:3 picture out of
+#             a pillarboxed 16:9 signal (240 px bars each side): 1440x1080 or
+#             960x720, no black bars.
+#   --rate    H.264 bitrate in kbps; only presets verified on the card are accepted.
 #
 # Needs the extension activated (macos/README.md) and ffmpeg. Ctrl-C stops it all;
 # gl310start then stops the encoder and reboots the card's firmware cleanly.
+#
 # Latency, measured by replaying a capture with its recorded timing:
 #   -threads 1         ffmpeg's frame threading held ~10 frames: 412 -> 79 ms
 #   -probesize 300000  the stream declares an audio PID that never carries data, so
 #   -analyzeduration 0 the default probe waited ~5 s before the first frame: -> 0.45 s
 # No -fflags nobuffer: with it VideoToolbox rejected the first ~0.7 s of a live stream.
-# Extra arguments go to gl310feed (e.g. --dry-run to test without the camera).
+
+# Bitrates (kbps) verified on the card at 1080p: 0 decode errors, no lost frames.
+# 60000 (AVerMedia's stated maximum) lost frames over USB, so it is not offered.
+RATES="2000 4000 8000 12000 20000 30000 40000"
+
+res=1080; aspect=16:9; rate=8000; dry=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --res)    res=$2; shift 2 ;;
+    --aspect) aspect=$2; shift 2 ;;
+    --rate)   rate=$2; shift 2 ;;
+    --dry-run) dry=--dry-run; shift ;;
+    *) echo "gl310cam: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+case " $RATES " in *" $rate "*) ;; *)
+  echo "gl310cam: --rate must be one of: $RATES" >&2; exit 2 ;; esac
+
+case "$aspect" in
+  16:9) vf="";                         W=1920 ;;
+  4:3)  vf="crop=1440:1080:240:0,";    W=1440 ;;
+  *) echo "gl310cam: --aspect must be 16:9 or 4:3" >&2; exit 2 ;;
+esac
+case "$res" in
+  1080) H=1080 ;;
+  720)  W=$((W * 2 / 3)); H=720 ;;
+  *) echo "gl310cam: --res must be 1080 or 720" >&2; exit 2 ;;
+esac
+vf="${vf}scale=${W}:${H}"
+
 here=$(cd "$(dirname "$0")" && pwd)
 feed="$here/../macos/build/gl310feed"
 [ -x "$feed" ] || { echo "build it first: macos/build.sh" >&2; exit 1; }
-"$here/gl310live" \
+echo "gl310cam: ${W}x${H} @ 30 fps, $rate kbps (aspect $aspect)" >&2
+"$here/gl310live" --rate "$rate" \
   | ffmpeg -hide_banner -loglevel error -hwaccel videotoolbox \
            -probesize 300000 -analyzeduration 0 -threads 1 -f mpegts -i - \
-           -f rawvideo -pix_fmt nv12 - \
-  | "$feed" "$@"
+           -vf "$vf" -f rawvideo -pix_fmt nv12 - \
+  | "$feed" --size "${W}x${H}" $dry
