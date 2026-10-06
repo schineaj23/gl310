@@ -1150,14 +1150,89 @@ the original "ffmpeg identifies it as h264 + aac" result: those codec names come
 the **PMT descriptor**, i.e. from what the muxer *declares*, not from decoded video.
 The muxer has been running correctly all along with nothing real to carry.
 
-So the remaining work is to give the encoder a picture: `CADI7441_InitDevice` plus
-`CADI7441_SelectVideoSource source(20)` over HW I²C (op `0x08`).
+So the remaining work is to give the encoder a picture — see below.
 
-One obstacle there: op `0x08` currently returns `00 00` for *every* slave address
-tried (`0x20 0x21 0x40 0x42 0x2a 0x54 0x5c`), so the reply gives no way to tell an ACK
-from a NAK and the bus cannot be scanned. The I²C reply format needs decoding from
-`CUsbCntl_I2CWriteThenRead` (`0x84f50`) first. GPIO `0x618` reads `0x0000ff1f`, so
-bit 12 is set, matching `QPCODEC_GPIO_BIT_VALUE bit(12) val(1)` in the working session.
+## The HDMI receiver: what's known, and the one thing blocking it
+
+### The init sequence, recovered
+
+`CADI7441_InitDevice` (`0x9ba10`) is short. A 1 s delay, then eight two-byte register
+writes across two I²C addresses, then calls to eight object slots:
+
+```
+QPTMDelayMilliS(1000)
+slave 0x31 <- f0 10      slave 0x35 <- 14 1f
+slave 0x31 <- f1 0f      slave 0x35 <- 15 ec
+slave 0x31 <- f4 20      slave 0x35 <- 1c 49
+                         slave 0x35 <- 1d 04
+                         slave 0x35 <- 5a 01
+```
+
+`0xf0`/`0xf1`/`0xf4` on the ADV744x family are the IO-map registers that program the
+I²C addresses of the sub-maps, so `0x31` is the IO map and `0x35` a sub-map.
+
+### Ordering: this happens BEFORE the firmware is loaded
+
+Easy to get wrong, and I did at first:
+
+```
+4.934  CADI7441_InitDevice()
+5.937  CADI7441_SelectVideoSource source(20)
+5.981  CQLCodec_FWDownloadAll()
+6.348  CQLCodecLib_InitDevice() QPSOS2
+```
+
+So host-side I²C runs against the **boot loader, with the ARM still in reset** — not
+against QPSOS, which owns the bus afterwards and has its own `i2c.c`.
+
+### Addressing and reply format
+
+Addresses are **7-bit**: the log prints `QPCODEC_DIAG_I2C_WRITE_THEN_READ(0x15)` for the
+Nuvoton MCU, whose 7-bit address is `0x15` (8-bit `0x2a`). `0x31` and `0x35` are
+likewise 7-bit, and both being odd rules out the 8-bit reading.
+
+From `CUsbCntl_I2CWriteThenRead` (`0x84f50`): the reply is **`rlen+1` bytes with the
+last byte a status, and `0x08` means success**. That makes ACK and NAK distinguishable,
+which is what makes a bus scan meaningful.
+
+### Which transport
+
+`CI2C_Constructor` (`0xa5310`) installs three slots per type, and the session builds
+two objects, `type(1)` and `type(6)`:
+
+| type | slot `+0x38` reaches | USB opcode |
+|------|----------------------|------------|
+| 1 | `CUsbCntl_I2CRead` | `0x08`, HW I²C |
+| 6 | `CUsbCntl_SWI2CRead` | `0x0c`, SW I²C |
+
+The MCU is on SW-I²C (the `data(12) len(9)` poll), so the ADV7441 is on **HW I²C, op
+`0x08`**.
+
+### The blocker: the I²C master never answers
+
+`tools/gl310i2c.c --scan` walks all 256 slave values and reports any status != 0.
+Result, in **both** states and on **both** transports:
+
+| transport | ARM held | firmware up |
+|-----------|----------|-------------|
+| op `0x08` HW | status `0x00` on all 256 | status `0x00` on all 256 |
+| op `0x0c` SW | status `0x06` on all 256 | status `0x06` on all 256 |
+
+Uniform, address-independent failure. `0x06` matches the firmware's own
+`QPSOSI2CTransfer: Software (GPIO) I2C not supported`, and the loader evidently
+refuses it too. `0x00` on the HW path looks like the command is accepted but the
+master does nothing.
+
+**Leading hypothesis: the I²C master is never enabled, because we only ever run
+`QPHCI_ReInit`.** The driver also has `QPHCI_Init` (`0x49d40`, 3598 B, versus 811 B for
+ReInit) which runs once at device start and reads `QLCODEC_REG_CHIP_VERSION`; our
+bring-up copies `CQLCodec_FWDownloadAll`, which only calls ReInit because `Init`
+already happened earlier in the driver's life. Decoding the difference — particularly
+any I²C clock or enable register — is the next step.
+
+GPIO `0x618` reads `0x0000ff1f`, so bit 12 is set, matching
+`QPCODEC_GPIO_BIT_VALUE bit(12) val(1)` in the working session. `AVer_GPIOI2C` turned
+out to be the AT88 crypto chip, not the video path.
 
 ### What the faster loop revealed
 
@@ -1249,11 +1324,11 @@ clearly on the critical path.
 - **Transport is done.** The consumed-count ack gives 100% TS continuity with zero
   loss, so asynchronous I/O is no longer on the critical path - it is a latency and
   CPU optimisation for later.
-- **ADV7441 setup IS needed** — this reverses an earlier note. The TS carries no
-  picture data, so the receiver must be configured over HW I²C after all:
-  `CADI7441_InitDevice` and `CADI7441_SelectVideoSource source(20)`. Decode the I²C
-  reply format from `CUsbCntl_I2CWriteThenRead` (`0x84f50`) first, because op `0x08`
-  currently answers `00 00` for every slave address and cannot distinguish ACK from NAK.
+- **Get the I²C master working.** The ADV7441 init sequence, its addresses, the
+  ordering and the reply format are all recovered, but no slave answers on either
+  transport in either ARM state. Decode `QPHCI_Init` (`0x49d40`) against
+  `QPHCI_ReInit` (`0x4aca0`) and apply whatever it does that we skip — most likely an
+  I²C clock or enable. Then replay the eight writes with `gl310i2c --init --go`.
 - **Task lifecycle.** A second `StartEncoder` after a `StopEncoder` produces no frames;
   the inbound mailbox then shows `cmd 0x50` (encoder stopped). Either send
   `SystemClose` (`0xf3`) first or just reboot the firmware between runs, which takes

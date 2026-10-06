@@ -10,6 +10,7 @@ tools/gl310mbox
 tools/gl310start
 tools/gl310recover
 tools/gl310ddr
+tools/gl310i2c
 tools/__pycache__/
 *.o
 *.swp
