@@ -14,6 +14,14 @@ layouts below were read out of the code rather than off the wire.
 > needed for this part: the device answers our own commands, so it validates the
 > framing itself. Reproduce with `tools/gl310probe.c`.
 
+> **Update 2026-10-05, later — the firmware boots.** QPSOS comes up fully in about
+> 8 ms and is running now, and it keeps a readable log in DRAM that narrates its own
+> boot. Read it with `tools/gl310log.c`. This **retracts** the earlier conclusion
+> that the ARM core executed nothing; see
+> [§ The firmware runs](#the-firmware-runs--proved-by-its-own-log) for what the three
+> measurement errors were. DDR training is *not* the blocker and should not be
+> re-run on the warm card.
+
 ## Endpoints
 
 `CUsbCntl_Constructor() cmd_wr(1) cmd_rd(3) dma_wr(0) dma_rd(2)`. Pipe *i* is the *i*-th
@@ -521,6 +529,12 @@ the held value for a while after the image was clobbered.
 Note that once released, the 64 status registers sit **static at `0xdc`** — the core
 is out of reset but idle, not spinning through a fault handler.
 
+> **Correction, later the same day.** Do not trust the `0x400`–`0x4fc` block. In
+> subsequent runs it read `0x00000000` regardless of reset state, so the readings
+> above are not reproducible and the "out of reset but idle" reading was wrong on
+> both counts. Use the firmware's log and the `0x064dc4` tick counter as the
+> liveness oracle instead.
+
 ### `QPHCI_PowerUp` — checked, not the blocker
 
 `QPHCI_PowerUp` (`0x498f0`) reads register `0x50`, clears bit `0x100` and writes it
@@ -534,50 +548,246 @@ bit 8 (0x100)  pad power-down (QPHCI_PowerUp clears, PowerDown sets)
 bit 10 (0x400) unknown, currently set
 ```
 
-### Where this points
+### RETRACTED: "the core cannot fetch from DRAM"
 
-The core is demonstrably released but executes nothing, even from a verified
-8-instruction loop at address 0. So the blocker is not the image and not the reset
-line — it is that **the core cannot fetch from DRAM.**
+> **This section's original conclusion was wrong and is kept only so the error is
+> on the record.** It claimed the core was released but executed nothing, and that
+> DDR training was therefore the blocker. Both claims are false. QPSOS boots, and
+> boots cleanly, in about 8 ms. See
+> [§ The firmware runs — proved by its own log](#the-firmware-runs--proved-by-its-own-log).
 
-That focuses everything on the one step deliberately skipped: **DDR training**
-(`CQLCodec_InitializeMemory`). DMA reaches DRAM correctly, but the DMA engine and
-the core's instruction-fetch path are different masters on the memory controller. A
-controller that is *configured* but never *trained* can plausibly serve the DMA port
-while failing core fetches.
+Three mistakes produced the wrong answer, all of them measurement errors rather
+than wrong reasoning about the hardware:
 
-Next, in order:
+1. **The stub test destroyed the boot header.** `gl310armtest` wrote 1 KiB of
+   mostly-zero padding over address 0, which includes **offset `0x100`, the ASCII
+   `QSOS` image header**. The loader validates that header, so it refused to start
+   anything. The stub never ran because the image was no longer bootable — not
+   because the core cannot fetch.
+2. **The liveness oracle was a single word in the wrong place.** The counter sat at
+   `0x080000`, which the running firmware never touches. QPSOS's live data is at
+   `0x064a90`, `0x06edb0`+ and across `0x234000`–`0x30d700`.
+3. **The `0x400`–`0x4fc` block is not a reliable reset oracle.** It read `0` in
+   later runs regardless of reset state. Use the firmware's own log and tick
+   counter instead.
 
-1. Implement step 3 fully — the `0xf14` command sequence and the rest of the `0xf00`
-   block, with `type=1`/`size=512Mb` constant-folded. Then re-run the stub test:
-   `0x400`'s block plus the counter give an unambiguous oracle.
-2. If that fails, find `QPCODEC_DIAG_HW_RESET`'s implementation (a second reset,
-   distinct from `RESET_ARM`) and any ARM clock or PLL gate.
+The DDR controller was never the problem: it is *already trained*. The live values
+`0x0f14 = 0x00020004` and `0x0f18 = 1` are exactly the post-training result (see
+[§ `CQLCodec_InitializeMemory`, decoded](#cqlcodec_initializememory-decoded)), so
+re-running step 3 would at best be a no-op and at worst cost us the warm state.
+
+Two further hypotheses were tested and are also dead:
+
+- **The HCI `+0x4000` aperture does not translate host addresses.** `tools/gl310aperture.c`
+  moved window 0's `start` (`0x81c`) from `0x4000` to `0x8000`, confirmed the register
+  took the write, and found our view of DRAM did not move at all. The
+  `0x81c`/`0x820`/`0x824` descriptors are simply not in the host access path. The
+  registers were restored and verified.
+- **Register `0x00` bit 13** — a step invisible in the log, see
+  [§ The hidden steps](#the-hidden-steps-the-log-could-not-show) — is already clear
+  on the live card (`0x00 = 0x03ff0300`), and `QPHCI_PowerUp` is a no-op on this
+  board, so neither was ever gating the core.
+
+## The firmware runs — proved by its own log
+
+The decisive test was read-only. `tools/gl310life.c` snapshots a wide span of DRAM
+by DMA, waits, snapshots again, and diffs. It writes nothing, so it cannot cost us
+the resident image. Over a 4 MB span with the core simply left alone:
+
+```
+$ ./gl310life --go --no-reset --len 0x400000 --settle 2000
+   56 of 1048576 words changed  (0x064b24 .. 0x3088f4)
+VERDICT: the ARM core IS executing.
+```
+
+**QPSOS is running, and has been all along.** The changed regions are the firmware's
+`.data`/`.bss` just above the image, plus heap and per-task structures spread over
+`0x234000`–`0x30d700` — a populated RTOS, not a crash.
+
+Better still, QPSOS keeps a **log buffer in DRAM** at `0x06edc0`, immediately above
+the image (`qpvidfwusb.bin` is `0x6edb0` bytes). Records are 16 bytes of header plus
+NUL-terminated text:
+
+| offset | meaning |
+|--------|---------|
+| `+0x00` | link/length |
+| `+0x04` | 0 |
+| `+0x08` | timestamp, in ticks of the ~193.4 MHz counter at `0x064dc4` |
+| `+0x0c` | source line number |
+| `+0x10` | text, tagged `(T)` trace, `(E)` error, `(W)` warn, `(I)` info |
+
+`tools/gl310log.c` reads and follows it. The full boot, verbatim from the card:
+
+```
+[    127910:338  ] (E)usbFlashCFI=0
+[    223529:340  ] (T)create usb workqueue...
+[    244323:340  ] (T)usb_msg_proc inited
+[    250670:340  ] (T)Keep the config, host will not see the change
+[    253265:340  ] (T)USB is previously configed
+[    274058:340  ] (T)USB: HW is DualSpeed
+[   1133458:340  ] (T)register -> Q.cam gadget(FX2)
+[   1141439:340  ] (T)ep1in bound @ 81
+[   1144007:340  ] (T)ep3in bound @ 83
+[   1146532:340  ] (T)ep2out bound @ 02
+[   1148912:340  ] (T)ep4out bound @ 04
+[   1166907:340  ] (T)ql300_set_config = 1
+[   1174792:340  ] (T)Enable ep1in, fifo(1) type=bulk, mps=512
+[   1198941:340  ] (T)enqueue req 1 to ep4out        ... through req 16
+[   1446048:308  ] (T)CODEC_Start HCI Thread
+[   1452553:308  ] (T)CODEC_SYS config:2 HIU isr
+[   1455576:308  ] (T)CODEC_SYS config:1 dynamic mem alloc
+[   1527175:308  ] (T)CODEC_Start M2M Thread
+[   1533338:308  ] (T)CODEC_Start DTM Thread
+[   1538166:308  ] (T)CODEC_Start VDCM Thread
+[   1543842:308  ] (T)Start Update Tick Thread
+```
+
+1,543,842 ticks at 193.4 MHz is **8.0 ms from reset release to all threads up**. The
+only error is `usbFlashCFI=0`, which is expected: there is no boot flash, which is
+why the image comes over USB in the first place.
+
+What this settles:
+
+- The boot sequence we implemented is **sufficient**. Steps 1–9 minus DDR training
+  produce a fully booted firmware.
+- `ResetArm` really does halt and restart the core. Holding then releasing it makes
+  the log replay from the top (148 records before, 189 after).
+- **`Q.cam gadget(FX2)` is confirmed**, no longer a strings-only guess — and the
+  endpoint bindings it prints (`ep1in@81 ep3in@83 ep2out@02 ep4out@04`) are exactly
+  the pipe map in [§ Endpoints](#endpoints). So after boot, *the ARM firmware itself
+  is the USB device we are talking to*; before boot it is a loader in ROM.
+- `0x064dc4` is a free-running ~193.4 MHz tick counter maintained by the firmware's
+  "Update Tick Thread" — a cheap, unambiguous heartbeat for all future work.
+
+### The hidden steps the log could not show
+
+`CQLCodec_FWDownloadAll` (`0x587e0`) is the orchestrator. The DebugView log only
+shows functions that print, so reading the function itself revealed two steps that
+were invisible on the wire, plus every delay:
+
+```
+ResetArm(0)                                  [slot +0x1f0]
+QPHCI_ReInit(hci)
+CQLCodec_InitializeMemory(this)
+CQLCodec_AOSwitch(this, this+0x348)
+CQLCodec_VOSwitch(this, this+0x338)          [0x4c2f0]
+CQLCodec_SetGPIODefaults(this)
+QPTMDelayMilliS(50)
+v = RegisterRead(0x0000); v &= ~0x2000; RegisterWrite(0x0000, v)   <-- not logged
+QPTMDelayMicroS(1)
+FWDownload(audio -> 0x100000)
+QPTMDelayMilliS(1)
+FWDownload(video -> 0x0)
+QPTMDelayMicroS(500)
+ResetArm(1)
+QPTMDelayMilliS(150)
+```
+
+`0x81a90` is `QPTMDelayMilliS`, `0x81ab0` is `QPTMDelayMicroS`. The 150 ms tail
+matches the log's ~165 ms to the next line. Register `0x00` bit 13 is cleared and
+never restored; on our warm card it is already clear.
+
+Accessor slots, resolved. The codec object embeds the HCI object at `+0x100`, so a
+codec slot at `+0x1XX` and an HCI slot at `+0xXX` are the same pointer:
+
+| slot | signature | is |
+|------|-----------|-----|
+| `+0xa0` / `+0x1a0` | `(hci, u8 reg, u8 val)` | HCI register write (op `0x00`) |
+| `+0xa8` / `+0x1a8` | `(hci, u16 reg, u32 *out)` | RegisterRead (op `0x01`) |
+| `+0xb0` / `+0x1b0` | `(hci, u16 reg, u32 val)` | RegisterWrite (op `0x01`) |
+| `+0xc8` / `+0x1c8` | `(hci, u32 byteaddr, u32 *out)` | MemoryRead (op `0x02`) |
+| `+0xd8` / `+0x1d8` | `(hci, u32 byteaddr, u32 val)` | MemoryWrite (op `0x02`) |
+| `+0xf0` / `+0x1f0` | `(hci, int run)` | ResetArm (op `0x07`) |
+
+Register accessors take the index in `dx` (16-bit); memory accessors take a full
+32-bit **byte** address in `edx` and shift it right by 2 themselves.
+
+### `CQLCodec_InitializeMemory`, decoded
+
+Not needed on the warm card, but required for a cold boot, so it is recorded here.
+`0x4b930`, driven by four config fields. Which branch this board takes is pinned by
+five independent live register values:
+
+| field | value | how we know |
+|-------|-------|-------------|
+| `+0x3c0` type | `1` | logged: `type(1)` |
+| `+0x3c4` size | `0x200` (512 Mb) | logged: `size(512Mb)` |
+| `+0x3c8` | `8` | `0xf10 = 0x05140080` rules out 4; the autodetect branch requires exactly 8; `QPHCI_PowerUp` early-returns on 8, matching its no-op behaviour |
+| `+0x3cc` | `0x10020` | only value that yields the live `0xf40 = 2` |
+
+So the board runs the **geometry-autodetect** path, which is why the live
+`0xf14 = 0x00020004` is *not* the hardcoded `0x20005` that `size == 0x200` would
+give. In order:
+
+```
+cols = 7; rows = 2
+RegisterWrite(0xf14, (rows << 16) | cols)
+MemoryWrite(0, (rows << 16) | cols)
+while (cols > 3) { MemoryWrite(1 << (cols + 6), cols - 1); cols--; }
+cols = MemoryRead(0) & 0xf                     /* aliasing reveals the real width */
+RegisterWrite(0xf14, (rows << 16) | cols)
+MemoryWrite(0, rows)
+while (rows > 1) { MemoryWrite(1 << (cols + 0x15), rows - 1); rows--; }
+rows = MemoryRead(0) & 0xf
+RegisterWrite(0xf14, (rows << 16) | cols)      /* -> 0x00020004 on this board */
+v = RegisterRead(0xf1c); RegisterWrite(0xf1c, v & ~0x300)
+RegisterWrite(0xf04, 0x0d03110b)
+RegisterWrite(0xf08, 0x00000003)
+RegisterWrite(0xf40, 0x00000002)               /* type==1 && 0x3cc==0x10020 */
+RegisterWrite(0xf10, 0x05140080)               /* 0x3c8 != 4 */
+RegisterWrite(0xf18, 0x00000001)
+QPTMDelayMilliS(100)
+```
+
+It probes address aliasing to find the real row/column width: write a value at 0, then
+a distinct marker at each candidate address line, and read address 0 back — whichever
+marker landed there tells you how many address bits physically exist. Note the probe
+runs *before* the timing registers are programmed, i.e. at reset-default timings.
+
+`0xf00 = 0x03020307` and `0xf0c = 0x02030000` are **never written by the driver** at
+all, so they are hardware reset defaults and need nothing from us.
 
 ### What remains for a cold boot
 
-Only three gaps, all small and all in hand:
+Nothing substantive. Every step is now written out:
 
-1. the `(from memory)` values in `CQLCodec_InitializeMemory` (derived from
-   `type`/`size`, which we know: `type=1`, `size=512Mb`);
-2. the third register of each `QPHCI_ReInit` window descriptor, and the `0x840`
-   writes;
-3. the bit masks in `AOSwitch(1)` / `VOSwitch(0)` on register `0x50`.
+1. `CQLCodec_InitializeMemory` — fully decoded above, including the autodetect loop
+   and all four config fields.
+2. `QPHCI_ReInit` — fully decoded, including the third register of each descriptor
+   and both `0x840` writes (`0x70003124` then `0x90003124`).
+3. The hidden `register 0x00 &= ~0x2000` step and every delay.
 
-Everything else is confirmed. Note this path does **not** depend on the warm state —
-it is a full cold bring-up, so it also removes our dependence on dock power.
+The one untested part is DDR training itself, because the card has stayed powered and
+re-running it on a trained controller would risk the warm state for no gain. It should
+be exercised the first time the card is cold-booted, with `gl310log` watching.
 
 ## Still to do
 
-- Finish DDR bring-up: resolve the `(from memory)` values in
-  `CQLCodec_InitializeMemory` that derive from `type`/`size`, and the third
-  register of each `QPHCI_ReInit` window descriptor. Needed for a **cold** boot;
-  not needed while the card stays powered.
-- Release the ARM (`ResetArm(run=1)`) and see whether QPSOS boots from the image
-  already in DRAM. If it does, SW-I²C, HDMI status, the mailbox and possibly the
-  firmware's debug shell all become reachable at once.
-- Why `ReadHciRegister` returns `0xff` — presumably HCI is dark until `QPHCI_ReInit`.
-- Why `0x0C` SW-I²C returns status `0x06`; decode `QPPFMGetAttr` in the firmware.
-- The meaning of the 1-byte reply to the DMA command (status? ready?).
-- The encoder start/stop message codes (`CEncoderTask_*` / `QPFWENCAPI_*`).
-- The ARM→host message/status registers (we have the host→ARM side).
+The firmware is up, so the remaining work is the actual goal: get frames out.
+
+- **Decode the mailbox.** `QPFWAPI_SendMessageToARM` (`0x5a8c0`), `QPFWAPI_AckARMMessage`
+  (`0x5ae40`), and the ARM→host poll. Live now: `0x6c8 = 0`, `0x6cc = 0`,
+  `0x6f8 = 8`, `0x6fc = 0xa`, so the ARM is idle and posting nothing — expected,
+  since we have never asked it to do anything.
+- **Post-boot init.** `CQLCodecLib_InitDevice`, then the `CQLCodec_Set` properties
+  for stream type/profile/level, then encoder start (`CEncoderTask_*`,
+  `QPFWENCAPI_*`). Every one of these should now be visible in `gl310log --follow`.
+- **Check the HDMI front end.** `CADI7441_InitDevice` for the ADV7441, and the
+  SW-I²C poll of slave `0x2a` sub `0x1b` that reports input status. The `0x06`
+  status from op `0x0C` may simply have been the loader's I²C, which the booted
+  firmware replaces.
+- Then the portable `libgl310` core, a macOS CMIOExtension and a Linux
+  v4l2loopback sink.
+
+### Instruments
+
+| tool | what it does | safety |
+|------|--------------|--------|
+| `gl310log` | reads/follows the firmware's own log | read-only |
+| `gl310life` | wide DRAM diff; proves execution and locates live structures | read-only |
+| `gl310probe` | registers, memory dumps, raw commands | read-only unless `--allow-write` |
+| `gl310aperture` | measures the HCI window translation | writes 3 regs, restores them |
+| `gl310init` | the 9-step bring-up and firmware download | writes DRAM |
+| `gl310armtest` | bare ARM stub loader | **destroys the image header at `0x100`** |
+| `sysmap.py` | name/disassemble the driver by its debug strings | static |
+| `fwarm.py` | ARM32 firmware analysis | static |

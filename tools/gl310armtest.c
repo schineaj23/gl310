@@ -32,6 +32,19 @@
  * DESTRUCTIVE: this overwrites the first 1 KiB at 0x0 and at 0x4000, so it
  * clobbers the resident firmware image. Restore it with `./gl310init --go`.
  *
+ * SUPERSEDED, AND IT LIED TO US. Both verdicts below are untrustworthy:
+ *
+ *   1. The 1 KiB of zero padding covers offset 0x100, which holds the ASCII
+ *      "QSOS" image header. The loader validates that header, so after this runs
+ *      the image is not bootable and NOTHING starts - which looks exactly like
+ *      "the core executes nothing". That false negative cost a day.
+ *   2. The counters sit at 0x080000, which the running firmware never touches,
+ *      so even a healthy boot would have moved neither of them.
+ *
+ * The ARM core does execute, and QPSOS boots in about 8 ms. Use `gl310log` to read
+ * the firmware's own log and `gl310life` for a wide read-only DRAM diff; between
+ * them there is no reason to run this at all. Kept only for the record.
+ *
  * Build:
  *   clang -O2 -o gl310armtest gl310armtest.c -I/opt/homebrew/include \
  *         -L/opt/homebrew/lib -lusb-1.0

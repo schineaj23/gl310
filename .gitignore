@@ -2,8 +2,13 @@
 tools/desc
 tools/gl310probe
 tools/gl310init
+tools/gl310armtest
+tools/gl310aperture
+tools/gl310life
+tools/gl310log
 tools/__pycache__/
 *.o
+*.swp
 
 # Ghidra working projects: large binary DBs plus lock/temp files
 ghidra/
