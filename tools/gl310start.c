@@ -246,10 +246,10 @@ int main(int argc, char **argv) {
     if (send_msg("StartEncoder", 0x01, 0, NULL, 0)) goto out;
 
     printf("\nWatching for frames for %d s (ARM posts cmd 0x40 on 0x6b0) ...\n", watch_s);
-    FILE *f = NULL;
+    FILE *f = NULL, *fidx = NULL;
     long total = 0;
     int frames = 0;
-    int max_frames = 240;
+    int max_frames = 90;
     for (int ms = 0; ms < watch_s * 1000; ms += 10) {
         unsigned int st = 0, msg = 0;
         if (reg_read(R_FROM_ARM_STAT, &st)) break;
@@ -281,7 +281,21 @@ int main(int argc, char **argv) {
                                "H.264 start codes: %d plain, %d byte-swapped\n",
                                done, addr, pl, sw);
                         if (!f) f = fopen(outpath, "wb");
-                        if (f) { fwrite(buf, 1, done, f); total += done; frames++; }
+                        if (f) {
+                            /* Record what each byte range in the capture came from, so
+                               reassembly can be worked out offline instead of guessed
+                               at while holding the card open. */
+                            if (!fidx) {
+                                char ip[1024];
+                                snprintf(ip, sizeof ip, "%s.idx", outpath);
+                                fidx = fopen(ip, "w");
+                                if (fidx) fprintf(fidx, "# ms offset len p1 p2 p3 p4 p5\n");
+                            }
+                            if (fidx)
+                                fprintf(fidx, "%d %ld %u 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+                                        ms, total, done, p[0], p[1], p[2], p[3], p[4]);
+                            fwrite(buf, 1, done, f); total += done; frames++;
+                        }
                     }
                     free(buf);
                 }
@@ -297,9 +311,10 @@ int main(int argc, char **argv) {
            unmodified does nothing, which is why the ARM re-posted one descriptor
            forever. */
         reg_write(R_FROM_ARM_STAT, st & ~1u);
-        usleep(2000);
+        usleep(8000);   /* gentler than the driver needs, but far gentler than before */
     }
     if (f) fclose(f);
+    if (fidx) fclose(fidx);
 
     printf("\n");
     if (frames)

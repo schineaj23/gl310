@@ -993,6 +993,65 @@ Doing only (1) is exactly the bug that produced 40 reads of one descriptor in th
 first run. The ack reply message (code `0x31` for encoder, `0xa2` for decoder) is only
 sent when bit 8 of the incoming message is set, and `cmd 0x40` arrives with it clear.
 
+### Frame reassembly, confirmed by continuity counters
+
+The ARM delivers each frame as **fragments**, and `p3` is the last-fragment flag. The
+two message subtypes in `CEncoderTask_ProcessArmMessage` name it: `EncDataOutReq`
+(`p3 = 0`, more to come) and **`EncDataOutLastReq`** (`p3 = 1`, end of frame). `p1` is
+the stream type (`0x83`; the function also logs `unknown compressed audio type(p1)`),
+`p2` is the address in words and `p4` the length in words.
+
+Fragment addresses chain exactly, and each frame's fragments sum to the compressed
+buffer size — e.g. `0x5ce6 + 0x1a`, `0x22f + 0x5ad1`, `0xfb + 0x5c05`,
+`0x23f2 + 0x390e`, all `= 0x5d00` words = 95,232 bytes.
+
+**So the correct reassembly is simply every fragment, in arrival order.** Un-swap each
+32-bit word and the result is the transport stream. Verified against TS
+continuity counters on PID `0x44`:
+
+```
+  step  0:      3   duplicate/stall
+  step  1:  11997   correct          <- 99.21%
+  step  2..15:  93  lost packets
+```
+
+The handful of errors are **losses, not duplicates**, which is the signature of a host
+that cannot keep up rather than of wrong reassembly. Two other numbers agree: the
+aggregate rate is 8.2 Mbps, matching the configured `VBRBitRate = 0x1f4007d0`
+(`0x1f40` = 8000 kbps peak), and the segment-only hypotheses give 2.6–6 Mbps, which
+do not.
+
+`tools/gl310start.c --out F` writes a sidecar `F.idx` of
+`ms offset len p1 p2 p3 p4 p5` so reassembly can be re-derived offline without holding
+the card open.
+
+### The firmware says what the real limit is
+
+After a capture run, `gl310log` grows from 46 lines to 637, every one of them:
+
+```
+(E)Drop
+(W)can't get sysmsg in dwc_otg_pcd_handle_in_ep_intr
+```
+
+That is QPSOS's Synopsys DesignWare USB OTG peripheral driver running out of system
+messages in its IN-endpoint interrupt handler, because the host is not draining fast
+enough. **This is almost certainly the mechanism behind the wedges below as well** —
+once that pool is exhausted the gadget stalls, and a stalled gadget is exactly what we
+saw. The two symptoms have one cause: a synchronous, one-transfer-at-a-time host loop
+against an 8 Mbps stream.
+
+The fix is the architecture the vendor driver already uses: **asynchronous, pipelined
+transfers**. `CUsbCntl_StartDMARead` calls `QPUsbInterface_UsbAsyncIo`, and
+`CQLCodec_StartDMARead` is invoked with `sync(0)` for frames (versus `sync(1)` for the
+firmware verify), with completion handled later in `CEncoderTask_ProcessIoComplete`.
+`libusb_submit_transfer` with several reads outstanding is the equivalent.
+
+Note also that `swap` is not host-side software byte swapping: `CQLCodec_StartDMARead`
+turns `swap != 0` into a mode value of 3 passed down to the DMA engine, and
+`CUsbCntl_StartDMARead` has no swap field in its 16-byte command — so it is a register
+the HCI layer programs. Swapping in software works fine meanwhile.
+
 ### Hazard: the command channel can wedge
 
 `CUsbCntl_GenericCmd` is a bare request/response pair on two bulk pipes with no
@@ -1010,15 +1069,37 @@ state. That reset is now last and behind `--hard` in `gl310recover`.
 
 ## Still to do
 
-- **Continuous capture.** Implement both halves of the ack and verify sequential,
-  distinct buffers; then a full TS with SPS/PPS, which gives resolution and frame rate.
-- **Un-swap on the fly** (32-bit word swap) and feed the TS to a decoder.
-- **ADV7441 setup.** `CADI7441_InitDevice` plus `CADI7441_SelectVideoSource source(20)`
-  run over HW I²C (op `0x08`; SW I²C is unimplemented in firmware). Not needed while
-  the receiver retains its configuration from the Windows session — which is evidently
-  the case, since the encoder produced real data — but required after a cold start.
+The protocol is finished. What remains is engineering, and one piece of it is now
+clearly on the critical path.
+
+- **Asynchronous capture.** This is the blocker for a usable stream: keep several
+  `libusb_submit_transfer` reads outstanding instead of one synchronous read per
+  notification, so the firmware's gadget message pool never empties. Expect the 0.79%
+  packet loss and the wedges to go away together.
+- **ADV7441 setup is not needed.** The encoder produced valid data on a *cold* card,
+  so the receiver passes a signal through without host I²C configuration.
+  `CADI7441_InitDevice` and `CADI7441_SelectVideoSource source(20)` are presumably
+  about input selection and format forcing, not basic operation.
+- **Task lifecycle.** A second `StartEncoder` after a `StopEncoder` produces no frames;
+  the inbound mailbox then shows `cmd 0x50` (encoder stopped). Either send
+  `SystemClose` (`0xf3`) first or just reboot the firmware between runs, which takes
+  8 ms and is what `gl310init --go` already does.
 - Then the portable `libgl310` core, a macOS CMIOExtension and a Linux v4l2loopback
   sink, decoding the TS with VideoToolbox / VAAPI.
+
+### Cold-start recipe, as it now stands
+
+```
+gl310init  --go        # 9-step bring-up + firmware download; QPSOS boots in ~8 ms
+gl310log               # confirm 46 lines ending "Start Update Tick Thread"
+gl310start --go        # configure + StartEncoder + capture, writes .bin and .bin.idx
+```
+
+Reassemble by concatenating every fragment from the `.idx` in order and swapping each
+32-bit word. DDR training is **not** required: the `0xf00` block comes up already
+holding every value the vendor writes, and a 48 MB write/read-back test passes before
+anything is touched (`gl310ddr --enable-only --go` demonstrates this; `0xf18` is
+read-only and ignores writes).
 - **Post-boot init.** `CQLCodecLib_InitDevice`, then the `CQLCodec_Set` properties
   for stream type/profile/level, then encoder start (`CEncoderTask_*`,
   `QPFWENCAPI_*`). Every one of these should now be visible in `gl310log --follow`.
