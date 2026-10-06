@@ -1329,6 +1329,54 @@ firmware boot. Neither is the loader state the vendor driver uses.
 > Not yet isolated: whether writing the GPIO defaults was actually required, or whether
 > the fresh-plug loader state alone is sufficient. The two were changed together.
 
+### The MCU protocol
+
+`InterfaceNUC100::accessRegs_viaNUC` (`0x20b40`) bridges to chips behind the MCU. Its
+request struct is `{ slave, dir, reg, _, data }` with `dir` 1 = write, 0 = read, and
+the MCU's own address comes from `this[8] >> 1` — i.e. the object stores the 8-bit
+`0x2a` and shifts to 7-bit `0x15`, confirming the 7-bit convention throughout.
+
+```
+write:  setI2C_sw  0e <slave> <dir> <reg> 01      (5 bytes)   delay 5 ms
+        setI2C_sw  13 <data>                      (2 bytes)   delay 5 ms
+        setI2C_sw  12 01                          (2 bytes)
+read:   setI2C_sw  0e <slave> <dir> <reg> 01 01   (6 bytes)   delay 15 ms
+        getI2C_sw  sub 0x13, 1 byte               -> data
+```
+
+So MCU command `0x0e` sets up a transaction, `0x13` carries the data byte, `0x12`
+triggers it. `HAL::setI2C_sw` takes `{slave, len, bytes...}` and `HAL::getI2C_sw` takes
+`{slave, wlen, wdata[8], rlen, rdata[]}` — which map onto ops `0x0b` and `0x0c`.
+
+### Reading the input signal, confirmed on hardware
+
+`getHdmiVideo_6604` (`0x211d0`) does **not** use `accessRegs_viaNUC` — it reads MCU
+registers directly, because the MCU already owns the IT6604 and reports what it sees:
+`0x1b` (1 byte status), `0x26` (1 byte), and `0x1d` (7 bytes of timing). The timing
+bytes are four 12-bit fields, nibble-packed two per three bytes:
+
+```
+WTotal = d[0] | ((d[1] & 0x0f) << 8)      WAct = ((d[1] & 0xf0) << 4) | d[2]
+HTotal = d[3] | ((d[4] & 0x0f) << 8)      HAct = ((d[4] & 0xf0) << 4) | d[5]
+```
+
+Live, with the camera connected (`gl310i2c --hdmi --no-hold`):
+
+```
+MCU 0x1b = 0x00   0x26 = 0x03
+MCU 0x1d = 98 78 80 33 22 1c 2e
+active 1920 x 540, total 2200 x 563
+-> 1920 x 1080 interlaced (540 lines per field)
+```
+
+2200 x 1125 total, 1920 x 1080 active, 540 lines per field: **textbook 1080i59.94**,
+and exactly what the Windows driver logged (`monitor match (WAct x HAct = 1920 x 540)`).
+
+**So the input is healthy and locked right now.** When the encoder produced a
+structurally perfect transport stream with no picture in it, the camera was not the
+problem — the receiver was seeing the signal all along. Whatever is missing is between
+the receiver and the encoder's video input unit.
+
 ### `CQLCodec_FWSwitchMode`, and why not to run it
 
 The driver can move the ARM between loader and main firmware — the gadget's

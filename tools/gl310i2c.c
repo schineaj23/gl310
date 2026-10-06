@@ -145,17 +145,49 @@ static void switch_mode(unsigned int flag) {
     usleep(400000);
 }
 
+/* InterfaceNUC100::getHdmiVideo_6604 (0x211d0) reads MCU register 0x1d, 7 bytes, and
+   unpacks four 12-bit fields from them - nibble-packed, two values per three bytes:
+
+     WTotal = d[0] | ((d[1] & 0x0f) << 8)
+     WAct   = ((d[1] & 0xf0) << 4) | d[2]
+     HTotal = d[3] | ((d[4] & 0x0f) << 8)
+     HAct   = ((d[4] & 0xf0) << 4) | d[5]
+
+   It also reads 0x1b (1 byte) and 0x26 (1 byte) for status. Note this goes straight
+   to the MCU - NOT through accessRegs_viaNUC - because the MCU already owns the
+   IT6604 and simply reports what it sees. */
+static void read_hdmi_status(void) {
+    unsigned char w, d[8] = {0}, st1 = 0, st2 = 0;
+    w = 0x1b; if (i2c_wr_rd(0x15, &w, 1, &st1, 1) != I2C_OK) { printf("  0x1b read failed\n"); return; }
+    w = 0x26; i2c_wr_rd(0x15, &w, 1, &st2, 1);
+    w = 0x1d; if (i2c_wr_rd(0x15, &w, 1, d, 7) != I2C_OK) { printf("  0x1d read failed\n"); return; }
+    unsigned int wtot = d[0] | ((d[1] & 0x0f) << 8);
+    unsigned int wact = ((d[1] & 0xf0) << 4) | d[2];
+    unsigned int htot = d[3] | ((d[4] & 0x0f) << 8);
+    unsigned int hact = ((d[4] & 0xf0) << 4) | d[5];
+    printf("  MCU 0x1b = 0x%02x   0x26 = 0x%02x\n", st1, st2);
+    printf("  MCU 0x1d = %02x %02x %02x %02x %02x %02x %02x\n",
+           d[0],d[1],d[2],d[3],d[4],d[5],d[6]);
+    printf("  active %u x %u, total %u x %u\n", wact, hact, wtot, htot);
+    if (wact && hact) {
+        int il = (htot < hact * 2);          /* field total, not frame total */
+        if (il) printf("  -> %u x %u interlaced (%u lines per field)\n", wact, hact * 2, hact);
+        else    printf("  -> %u x %u progressive\n", wact, hact);
+    }
+}
+
 /* The two register blocks from CADI7441_InitDevice, in order. */
 static const unsigned char BLOCK_A[][2] = { {0xf0,0x10}, {0xf1,0x0f}, {0xf4,0x20} };
 static const unsigned char BLOCK_B[][2] = { {0x14,0x1f}, {0x15,0xec}, {0x1c,0x49},
                                             {0x1d,0x04}, {0x5a,0x01} };
 
 int main(int argc, char **argv) {
-    int scan = 0, go = 0, init = 0, hold = 1, shift = 1, swmode = 0;
+    int scan = 0, go = 0, init = 0, hold = 1, shift = 1, swmode = 0, hdmi = 0;
     unsigned int rd_slave = 0; int rd_sub = -1, rd_n = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--scan")) scan = 1;
         else if (!strcmp(argv[i], "--sw")) sw = 1;
+        else if (!strcmp(argv[i], "--hdmi")) hdmi = 1;
         else if (!strcmp(argv[i], "--switch")) swmode = 1;
         else if (!strcmp(argv[i], "--unswitch")) swmode = 2;
         else if (!strcmp(argv[i], "--go")) go = 1;
@@ -213,6 +245,8 @@ int main(int argc, char **argv) {
         }
         if (!found) printf("  nothing answered on any of 256 addresses.\n");
     }
+
+    if (hdmi) { sw = 1; printf("HDMI input status, via the NUC100 MCU at 0x15:\n"); read_hdmi_status(); }
 
     if (rd_sub >= 0) {
         unsigned char w = (unsigned char)rd_sub, out[32] = {0};
