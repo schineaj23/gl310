@@ -209,6 +209,14 @@ static void read_hdmi_status(void) {
 static const unsigned char BLOCK_A[][2] = { {0xf0,0x10}, {0xf1,0x0f}, {0xf4,0x20} };
 static const unsigned char BLOCK_B[][2] = { {0x14,0x1f}, {0x15,0xec}, {0x1c,0x49},
                                             {0x1d,0x04}, {0x5a,0x01} };
+/* CADI7441_SelectVideoSource(20) -> CADI7441_WriteBlock, which writes to the slave in
+   this[0x3b0] = 0x21 (proven from the construction site at 0x44628). */
+static const unsigned char SRC20[][2] = {
+    {0x00,0x00},{0x03,0x09},{0x04,0x47},{0x05,0x06},{0x06,0x02},{0x17,0x01},
+    {0x1d,0x40},{0x31,0x12},{0x34,0x00},{0x35,0x02},{0x37,0x00},{0x3a,0x01},
+    {0x3c,0x58},{0x47,0x00},{0x68,0xf0},{0x69,0x00},{0x6b,0xe3},{0x7b,0x0d},
+    {0xba,0xa0},{0xc8,0x08},{0xf3,0x00},{0xf4,0x3f},
+};
 
 int main(int argc, char **argv) {
     int scan = 0, go = 0, init = 0, hold = 1, shift = 1, swmode = 0, hdmi = 0;
@@ -336,7 +344,18 @@ int main(int argc, char **argv) {
                        BLOCK_B[i][0], BLOCK_B[i][1], st, st == I2C_OK ? "" : "  FAILED");
                 if (st != I2C_OK) fails++;
             }
-            printf("  %d of 8 writes failed\n", fails);
+            printf("  %d of 8 writes reported failure\n", fails);
+            printf("  SelectVideoSource(20) -> slave 0x21, 22 registers\n");
+            usleep(50000);
+            int f2 = 0;
+            for (int i = 0; i < 22; i++) {
+                int st = i2c_write(0x21, SRC20[i], 2);
+                if (st != I2C_OK) f2++;
+            }
+            printf("  %d of 22 reported failure\n", f2);
+            printf("\n  NOTE: HW I2C writes return 0x08 for every address, including\n"
+                   "  ones with nothing on them, so these statuses mean nothing. The\n"
+                   "  only real test is whether video appears downstream.\n");
         }
     }
 

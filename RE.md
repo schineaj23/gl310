@@ -1436,6 +1436,67 @@ Re-applying the `QPHCI_ReInit` sequence changed nothing and did not revive HW I�
 **8. `0x50` bit 8 (pad power-down) is already clear** on a fresh card (`0x50 = 0x404`),
 so pad power is not gating I²C either.
 
+### HW I²C is fire-and-forget — which invalidates the Windows evidence
+
+Tested with controls, and this overturns the conclusion above.
+
+```
+SW write  0x15 (present) -> 0x08      SW write 0x21 (absent) -> 0x06
+SW write  0x4e (absent)  -> 0x06      SW read  0x21          -> 0x06
+HW write  0x31 -> 0x08   HW write 0x21 -> 0x08   HW write 0x4e -> 0x08
+HW read   (any address)  -> 0x00
+```
+
+SW write status is meaningful: it reports NAK. **HW write status is not** — it returns
+`0x08` for every address, including ones with nothing on them. HW reads always fail,
+including write-then-read with a sub-address.
+
+So **retract claim 5 above.** The driver only ever *writes* to the ADV7441
+(`InitDevice`, `SelectVideoSource`, `SetVideoRes` are all writes), and
+`CUsbCntl_I2CWrite` logs a NAK only when the status byte is not 8 — which on this
+transport it always is. The Windows log would therefore show no I²C error **whether or
+not the chip was there or the master worked**. Its silence proves nothing.
+
+Also worth recording: `CUsbCntl_I2CWrite` *logs* a bad I²C status but returns the
+GenericCmd status, so a NAK never propagates to callers. `CADI7441_WriteBlock`'s error
+message could not fire on a NAK even in principle.
+
+### Replaying the receiver init does change the stream
+
+With the correct 7-bit addressing (the driver passes `0x31`/`0x35`/`0x21` straight into
+the slave byte — `--shift 0`), in loader mode, before the firmware download:
+
+```
+gl310i2c --init --shift 0 --go     # 8 writes to 0x31/0x35, then 22 to 0x21
+gl310init --go
+gl310start --go
+```
+
+The captured elementary stream changes substantially:
+
+| | before receiver init | after |
+|---|---|---|
+| entropy | 5.396 bits/byte | **6.914** |
+| `0x00` share | 27 % | 0.7 % |
+| `0xff` share | 14 % | 3.5 % |
+| TS continuity | 100 % | 28315/28316 |
+
+And the PES layer is now unambiguously valid — headers are `00 00 01 e0` with
+stream_id `0xe0`, PTS present, and **PTS increments by exactly 3003 ticks at 90 kHz =
+29.97 fps**.
+
+> One correction to my own reasoning here: I initially called the drop of `00 00 00`
+> from 448,928 to **0** strong evidence of H.264 emulation prevention. It is not. At
+> `P(0x00) = 0.0068` over 5.2 MB the expected count by chance is about **1.6**, so zero
+> is unremarkable. The entropy and byte-distribution changes are real; that one was not.
+
+**It is still not decodable video.** There is no SPS anywhere in the stream (0 NAL
+type 7, against 24 PPS and 1 IDR), so `ffmpeg` reports `dimensions not set` and decodes
+0 frames. Only 5 PES starts appear in 28,317 packets, i.e. about 1 MB per frame where
+1080i at 8 Mbps should be ~33 KB — so the capture still contains far more data than the
+encoder can be producing, even though TS continuity says the packet sequence is
+contiguous. Those two facts are not yet reconciled.
+
 ### Still open, stated honestly
 
 HW I²C (op `0x08`) returns status `0x00` for **every** address in **every** state
